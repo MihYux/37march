@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "product": "ReHoYo March 7th Desktop Companion",
+  "dataMode": "local-demo",
+  "localFiles": [
+    {
+      "name": "companion-data.json",
+      "purpose": "角色同行授权、关系、共同记忆、通信、发行沙盒与执行日志",
+      "containsSecrets": false,
+      "retention": "保留到玩家删除关系数据或清除应用数据",
+      "userControls": [
+        "查看",
+        "导出",
+        "撤销记忆引用",
+        "删除记忆",
+        "删除关系数据"
+      ]
+    },
+    {
+      "name": "ai-settings.json",
+      "purpose": "DeepSeek 模型偏好和可选加密 API Key",
+      "containsSecrets": true,
+      "protection": "Electron safeStorage；不可用时只保留在进程内存",
+      "userControls": [
+        "清除 API Key"
+      ]
+    },
+    {
+      "name": "tts-settings.json",
+      "purpose": "CosyVoice 播放偏好、声音授权确认和可选加密 API Key",
+      "containsSecrets": true,
+      "protection": "Electron safeStorage 或 macOS 钥匙串；不可用时不持久保存明文 Key",
+      "userControls": [
+        "关闭语音",
+        "撤销声音授权确认",
+        "清除 API Key"
+      ]
+    },
+    {
+      "name": "service-usage.json",
+      "purpose": "按日请求数、字符数和熔断状态",
+      "containsSecrets": false,
+      "contentExcluded": [
+        "对话正文",
+        "待朗读文本",
+        "API Key"
+      ],
+      "retention": "跨日自动重置计数"
+    },
+    {
+      "name": "window-state.json",
+      "purpose": "窗口位置、尺寸、置顶和吸附偏好",
+      "containsSecrets": false,
+      "retention": "保留到清除应用数据；点击穿透不跨重启恢复"
+    }
+  ],
+  "thirdPartyFlows": [
+    {
+      "provider": "DeepSeek",
+      "defaultEnabled": false,
+      "sent": [
+        "角色系统提示",
+        "最近必要对话上下文",
+        "当前用户消息",
+        "模型和思考偏好"
+      ],
+      "notSent": [
+        "共同相册",
+        "发行任务",
+        "本地文件",
+        "DashScope API Key"
+      ]
+    },
+    {
+      "provider": "DashScope CosyVoice",
+      "defaultEnabled": false,
+      "requiresRightsConfirmation": true,
+      "sent": [
+        "待朗读文本",
+        "音色 ID",
+        "语速",
+        "语言",
+        "情绪表达指令"
+      ],
+      "notSent": [
+        "完整聊天历史",
+        "共同相册",
+        "本地声音样本",
+        "DeepSeek API Key"
+      ]
+    }
+  ],
+  "neverCollectedByPrototype": [
+    "真实游戏账号",
+    "支付和消费记录",
+    "通讯录",
+    "桌面内容",
+    "麦克风录音",
+    "精确位置",
+    "真实商业指标"
+  ]
+}

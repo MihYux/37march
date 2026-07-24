@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+coverage/
+tmp/
+.DS_Store
+*.log
+assets/reference/
+*.rar
+*.7z
+*.moc3
+*.model3.json
+*.motion3.json
+*.exp3.json
+*.wav
+*.mp3

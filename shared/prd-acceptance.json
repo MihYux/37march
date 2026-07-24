@@ -1,0 +1,411 @@
+{
+  "schemaVersion": 1,
+  "source": "ReHoYo_角色同行计划_PRD_v1.0.md",
+  "reviewedAt": "2026-07-24",
+  "prototypeStatus": "accepted",
+  "formalReleaseStatus": "blocked",
+  "items": [
+    {
+      "id": "PRD-ACC-01",
+      "domain": "skill",
+      "criterion": "Codex 能读取三月七 Skill。",
+      "status": "verified",
+      "verification": "统一 Profile 固定了可验证的上游仓库与 Git 提交。",
+      "evidence": [
+        "shared/march7th-skill-profile.json",
+        "src/domain/skill-profile.test.ts"
+      ]
+    },
+    {
+      "id": "PRD-ACC-02",
+      "domain": "skill",
+      "criterion": "存在统一的角色适配层。",
+      "status": "verified",
+      "verification": "主进程、活动审核和前端读取同一 Profile。",
+      "evidence": [
+        "shared/march7th-skill-profile.json",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-03",
+      "domain": "skill",
+      "criterion": "人设规则不散落在业务组件中。",
+      "status": "verified",
+      "verification": "角色事实、行为、关系与安全规则集中在 Profile；组件只负责呈现和操作。",
+      "evidence": [
+        "shared/march7th-skill-profile.json",
+        "src/domain/skill-profile.test.ts"
+      ]
+    },
+    {
+      "id": "PRD-ACC-04",
+      "domain": "skill",
+      "criterion": "每条持久化内容记录 Skill 版本。",
+      "status": "verified",
+      "verification": "消息 trace 固定 skillVersion，历史内容不会随 Profile 更新被改写。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-05",
+      "domain": "skill",
+      "criterion": "Skill 规则缺失时不能批准发行内容。",
+      "status": "verified",
+      "verification": "自动审核把 Skill 完整性作为硬门禁。",
+      "evidence": [
+        "electron/campaign-review.cjs",
+        "electron/campaign-review.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-06",
+      "domain": "desktop_pet",
+      "criterion": "桌宠可显示、拖动、吸附、暂停和关闭。",
+      "status": "verified",
+      "verification": "Electron 窗口状态、拖动、吸附、托盘暂停与关闭路径均有实现。",
+      "evidence": [
+        "electron/window-state.cjs",
+        "electron/window-state.test.cjs",
+        "src/ui/window-drag.test.ts"
+      ]
+    },
+    {
+      "id": "PRD-ACC-07",
+      "domain": "desktop_pet",
+      "criterion": "至少有四种可区分桌宠状态。",
+      "status": "verified",
+      "verification": "状态派生器提供七种状态及独立标签和视觉反馈。",
+      "evidence": [
+        "src/domain/pet-activity.ts",
+        "src/domain/pet-activity.test.ts"
+      ]
+    },
+    {
+      "id": "PRD-ACC-08",
+      "domain": "desktop_pet",
+      "criterion": "桌宠可打开通信中心和共同相册。",
+      "status": "verified",
+      "verification": "快捷入口与托盘路由均可打开两个独立面板。",
+      "evidence": [
+        "src/App.tsx",
+        "electron/ipc-contract.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-09",
+      "domain": "desktop_pet",
+      "criterion": "勿扰状态下不产生主动气泡。",
+      "status": "verified",
+      "verification": "所有主动事件在生成和发送前经过统一联系策略，勿扰时进入抑制日志。",
+      "evidence": [
+        "electron/contact-policy.cjs",
+        "electron/contact-policy.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-10",
+      "domain": "desktop_pet",
+      "criterion": "连续忽略联系后自动降低频率。",
+      "status": "verified",
+      "verification": "连续两次忽略触发七天安静期，玩家主动互动可提前解除。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-11",
+      "domain": "relationship",
+      "criterion": "首次进入提供第一次同行选择。",
+      "status": "verified",
+      "verification": "四步引导最后要求玩家明确选择同行方式。",
+      "evidence": [
+        "src/components/CompanionOnboarding.tsx",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-12",
+      "domain": "relationship",
+      "criterion": "第一次选择可形成用户确认的长期记忆。",
+      "status": "verified",
+      "verification": "仅在玩家同意长期记忆后创建 userConfirmed 选择记忆。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-13",
+      "domain": "relationship",
+      "criterion": "玩家可查看和删除长期记忆。",
+      "status": "verified",
+      "verification": "共同相册支持查看、单条删除和全部清空，并同步移除引用。",
+      "evidence": [
+        "src/components/AlbumPanel.tsx",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-14",
+      "domain": "relationship",
+      "criterion": "关闭记忆引用后后续内容不能再使用该记忆。",
+      "status": "verified",
+      "verification": "生成器只选择同时获确认且允许引用的记忆。",
+      "evidence": [
+        "electron/campaign-review.test.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-15",
+      "domain": "relationship",
+      "criterion": "时间快进可跨日期推进关系。",
+      "status": "verified",
+      "verification": "独立 demoNow 支持 Day 1、7、14、42 与一年内自定义日期。",
+      "evidence": [
+        "electron/demo-scenarios.cjs",
+        "electron/demo-scenarios.test.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-16",
+      "domain": "communication",
+      "criterion": "通信中心可展示日常、照片、旅行和版本消息。",
+      "status": "verified",
+      "verification": "通信中心按类型展示已审核且已发送的内容。",
+      "evidence": [
+        "src/components/CommunicationCenter.tsx",
+        "src/domain/messages.test.ts"
+      ]
+    },
+    {
+      "id": "PRD-ACC-17",
+      "domain": "communication",
+      "criterion": "消息支持回复、收藏和不感兴趣。",
+      "status": "verified",
+      "verification": "只接受固定回复枚举，并持久化喜欢、收藏、稍后与负反馈。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/companion-store.test.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-18",
+      "domain": "communication",
+      "criterion": "版本通信可打开模拟版本页。",
+      "status": "verified",
+      "verification": "版本行动只允许 product:// 产品内目标，并路由到本地发行沙盒。",
+      "evidence": [
+        "src/components/CommunicationCenter.tsx",
+        "electron/campaign-review.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-19",
+      "domain": "communication",
+      "criterion": "消息可追溯到事件、任务和 Skill。",
+      "status": "verified",
+      "verification": "消息保存 eventId、campaignId 与包含 Skill、模板、规则、事实、记忆的 trace。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-20",
+      "domain": "campaign",
+      "criterion": "系统可以接收本地发行任务。",
+      "status": "verified",
+      "verification": "发行沙盒支持创建、编辑和持久化任务。",
+      "evidence": [
+        "src/components/CampaignStudioPanel.tsx",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-21",
+      "domain": "campaign",
+      "criterion": "可以生成预热、上线、持续和召回内容。",
+      "status": "verified",
+      "verification": "Skill 模板和受控渲染器覆盖四个阶段。",
+      "evidence": [
+        "shared/march7th-skill-profile.json",
+        "electron/campaign-review.cjs",
+        "electron/campaign-review.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-22",
+      "domain": "campaign",
+      "criterion": "固定事实不能在生成阶段被改写。",
+      "status": "verified",
+      "verification": "事实以锁定条目保存，审核拒绝未锁定、缺失、篡改或外链内容。",
+      "evidence": [
+        "electron/campaign-review.cjs",
+        "electron/campaign-review.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-23",
+      "domain": "campaign",
+      "criterion": "未经审核的内容不能进入玩家通信沙盒。",
+      "status": "verified",
+      "verification": "玩家通信查询只返回 approved 且带 sentAt 的消息。",
+      "evidence": [
+        "src/domain/messages.ts",
+        "src/domain/messages.test.ts"
+      ]
+    },
+    {
+      "id": "PRD-ACC-24",
+      "domain": "campaign",
+      "criterion": "沙盒可以投递内容并收集玩家反馈。",
+      "status": "verified",
+      "verification": "独立人工审核后可受控投递，并记录固定反馈。",
+      "evidence": [
+        "electron/companion-store.test.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-25",
+      "domain": "campaign",
+      "criterion": "暂停和停止任务立即生效。",
+      "status": "verified",
+      "verification": "暂停移除活动关联，停止还会取消事件并使待发送内容失效。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-26",
+      "domain": "campaign",
+      "criterion": "任务完成后恢复日常陪伴。",
+      "status": "verified",
+      "verification": "完成阶段移除活动任务且不改变日常内容授权。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-27",
+      "domain": "campaign",
+      "criterion": "营销内容不会无限循环。",
+      "status": "verified",
+      "verification": "固定排期、周上限、重复模板窗口、负反馈、停止与完成共同限制版本触达。",
+      "evidence": [
+        "electron/contact-policy.cjs",
+        "electron/contact-policy.test.cjs",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-28",
+      "domain": "safety",
+      "criterion": "退订后不再主动发送相应内容。",
+      "status": "verified",
+      "verification": "退订即时移除允许内容类型，后续事件由联系策略抑制。",
+      "evidence": [
+        "electron/contact-policy.test.cjs",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-29",
+      "domain": "safety",
+      "criterion": "未授权记忆不会被使用。",
+      "status": "verified",
+      "verification": "记忆开关、逐条复用、用户确认与消息审核形成多层门禁。",
+      "evidence": [
+        "electron/campaign-review.test.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-30",
+      "domain": "safety",
+      "criterion": "发行任务不能覆盖玩家联系频率。",
+      "status": "verified",
+      "verification": "所有活动投递仍须通过统一联系策略。",
+      "evidence": [
+        "electron/contact-policy.cjs",
+        "electron/contact-policy.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-31",
+      "domain": "safety",
+      "criterion": "人设或事实校验失败时内容不得执行。",
+      "status": "verified",
+      "verification": "失败内容进入 automatic_check_failed，事件取消且没有 sentAt。",
+      "evidence": [
+        "electron/campaign-review.test.cjs",
+        "electron/companion-store.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-32",
+      "domain": "safety",
+      "criterion": "所有玩家数据都明确标记为模拟数据。",
+      "status": "verified",
+      "verification": "根数据 isDemoData、界面水印和固定事实同时声明模拟性质。",
+      "evidence": [
+        "electron/demo-scenarios.test.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-33",
+      "domain": "demo",
+      "criterion": "默认案例可以直接打开演示。",
+      "status": "verified",
+      "verification": "重置和初始 Demo 都加载确定性的日本剧情玩家。",
+      "evidence": [
+        "electron/demo-scenarios.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-34",
+      "domain": "demo",
+      "criterion": "可在三分钟内快进 Day 1、Day 14 和 Day 42。",
+      "status": "verified",
+      "verification": "完整自动化演示链路执行远低于三分钟。",
+      "evidence": [
+        "electron/prd-acceptance.test.cjs",
+        "src/components/DemoControlPanel.tsx"
+      ]
+    },
+    {
+      "id": "PRD-ACC-35",
+      "domain": "demo",
+      "criterion": "体验能从日常关系自然过渡到版本内容。",
+      "status": "verified",
+      "verification": "排期先经过联系策略和记忆授权，再从共同经历生成版本内容。",
+      "evidence": [
+        "electron/campaign-review.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    },
+    {
+      "id": "PRD-ACC-36",
+      "domain": "demo",
+      "criterion": "演示数据可以完整重置。",
+      "status": "verified",
+      "verification": "重置后快照与初始默认案例逐字一致。",
+      "evidence": [
+        "electron/companion-store.cjs",
+        "electron/companion-store.test.cjs",
+        "electron/prd-acceptance.test.cjs"
+      ]
+    }
+  ]
+}

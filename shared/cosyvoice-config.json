@@ -1,0 +1,11 @@
+{
+  "provider": "dashscope",
+  "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
+  "model": "cosyvoice-v3.5-flash",
+  "voiceId": "cosyvoice-v3.5-flash-marchpet-eb86bcaeea5f40669b1798191950529a",
+  "format": "wav",
+  "streamingFormat": "pcm",
+  "sampleRate": 24000,
+  "language": "zh",
+  "defaultInstruction": "请用自然、活泼、亲切的年轻女性语气表达，吐字清晰，避免过度夸张。"
+}
