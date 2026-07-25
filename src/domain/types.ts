@@ -214,10 +214,28 @@ export interface MemoryRecord {
   reusableByCharacter: boolean;
   userConfirmed: boolean;
   sourceEventId?: string;
+  origin?: "explicit" | "automatic";
+  hidden?: boolean;
+  confidence?: number;
+  lastReferencedAt?: string;
+  supersededBy?: string;
   visual?: {
     assetId: string;
     alt: string;
   };
+}
+
+export interface ConversationEpisode {
+  id: string;
+  conversationId: string;
+  turnId: string;
+  createdAt: string;
+  expiresAt: string;
+  userSummary: string;
+  assistantSummary: string;
+  topics: string[];
+  replySource: "model" | "local" | "error";
+  refinedAt?: string;
 }
 
 export interface RelationshipEvent {
@@ -412,6 +430,7 @@ export interface CompanionData {
   profile: PlayerCompanionProfile;
   relationship: RelationshipState;
   memories: MemoryRecord[];
+  conversationEpisodes: ConversationEpisode[];
   events: RelationshipEvent[];
   messages: CharacterMessage[];
   campaigns: CharacterCampaignTask[];

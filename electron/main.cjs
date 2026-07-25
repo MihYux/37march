@@ -28,6 +28,7 @@ const {
   reviewCharacterOutput,
 } = require("./content-safety.cjs");
 const { CompanionStore } = require("./companion-store.cjs");
+const { ReleaseSkillLoader } = require("./release-skill-loader.cjs");
 const { ReleaseWorkspaceStore } = require("./release-workspace-store.cjs");
 const {
   ServiceBudgetStore,
@@ -60,6 +61,9 @@ let isPinned = true;
 let isQuitting = false;
 let windowStateStore;
 let windowStateWriteTimer;
+let petRendererHeartbeatAt = Date.now();
+let petRendererHeartbeatSeen = false;
+let petRendererWatchdog;
 
 // 桌宠窗口有两种模式：PET（默认 376×620，只露桌宠）与 PANEL（齿轮展开后的大面板）。
 // Windows 上对 transparent+frameless 窗口，任何几何调用（setPosition/setBounds）
@@ -74,6 +78,9 @@ function currentSize() {
   return windowMode === "panel" ? PANEL_SIZE : getPetSize(petScale);
 }
 let releaseWorkspaceStore;
+let releaseSkillLoader;
+let memoryRefinementTimer;
+let memoryRefinementRunning = false;
 let aiSettingsStore;
 let companionStore;
 let companionDataPath;
@@ -377,7 +384,7 @@ function keepPetWindowOnScreen() {
 
 function messageCharacterCount(messages) {
   if (!Array.isArray(messages)) return 0;
-  return messages.slice(-12).reduce(
+  return messages.slice(-20).reduce(
     (total, message) =>
       total +
       (typeof message?.content === "string"
@@ -500,18 +507,20 @@ function registerAiHandlers() {
             .reverse()
             .find((message) => message?.role === "user")
         : undefined;
-      const authorizedMemories =
-        companionStore.getAuthorizedChatMemories(
-          latestUserMessage?.content ?? "",
-          3,
-        );
-      const memoryContext = authorizedMemories.length
-        ? `\n\n【玩家已确认且允许引用的记忆】\n${authorizedMemories
-            .map(
-              (memory) =>
-                `- [${memory.id}] ${memory.title}：${memory.summary}`,
-            )
-            .join("\n")}\n只能在当前话题自然相关时引用；不得声称知道其他信息。`
+      const relevantMemory = companionStore.getRelevantMemoryContext(
+        latestUserMessage?.content ?? "",
+        { durableLimit: 5, episodeLimit: 3 },
+      );
+      const memoryLines = [
+        ...relevantMemory.durable.map(
+          (memory) => `- 长期记忆：${memory.summary}`,
+        ),
+        ...relevantMemory.episodes.map(
+          (episode) => `- 近期对话：${episode.userSummary}`,
+        ),
+      ];
+      const memoryContext = memoryLines.length
+        ? `\n\n【仅供自然关联时使用的玩家记忆】\n${memoryLines.join("\n")}\n这些内容不是本轮必须提及的素材。只有与玩家当前意图直接相关时才可简短引用；禁止暴露记忆系统、推断未提供信息或为了发行强行套用记忆。`
         : "";
       const activeRelease =
         companionStore.getActiveReleasePlanContext();
@@ -532,29 +541,16 @@ function registerAiHandlers() {
         model: settings.model,
         thinking: settings.thinking,
         messages: payload?.messages,
-        systemPrompt: `${promptConfig.systemPrompt}${memoryContext}${releaseContext}`,
+        systemPrompt: `${promptConfig.systemPrompt}${memoryContext}${releaseContext}${activeRelease
+          ? `\n\n【发行行为 Skill（高于发行方案，低于玩家安全和明确设置）】\n${releaseSkillLoader.getPrompt()}\n\n优先级：玩家安全与明确设置 > 主动触达/频控策略 > 发行 Skill > 当前区域发行方案 > 可引用记忆。内部完成 execute/postpone/skip、Level 0-4 与发送前自检，但只输出 march7th_action.message 的自然语言。玩家可见回复严禁出现发行方案、发行目标、发行任务、灰度、触达、频控、指标、实验或任何内部字段；无法自然改写时就不提版本。`
+          : ""}`,
       });
       serviceBudgetStore.recordSuccess("deepseek");
       const outputSafety = reviewCharacterOutput(result.content);
-      const memoryCandidate = latestUserMessage
-        ? companionStore.proposeChatMemoryCandidate(
-            latestUserMessage.content,
-            `chat-${Date.now()}`,
-          )
-        : undefined;
       return {
         ok: true,
         ...result,
         content: outputSafety.safeText,
-        memoryCandidate: memoryCandidate
-          ? {
-              id: memoryCandidate.id,
-              title: memoryCandidate.title,
-              summary: memoryCandidate.summary,
-              characterText: memoryCandidate.characterText,
-              category: memoryCandidate.category,
-            }
-          : undefined,
         safety: {
           filtered: !outputSafety.allowed,
           ruleIds: outputSafety.ruleIds,
@@ -720,15 +716,15 @@ function registerReleaseWorkspaceHandlers() {
     releaseWorkspaceStore.publishToAgents(
       payload?.regionId, payload?.directiveId, payload?.experimentId,
     ));
-  ipcMain.handle("release:publish-plan-to-agents", (_event, payload) => {
-    const releaseSnapshot = releaseWorkspaceStore.publishPlanToAgents(
-      payload?.regionId,
-      payload?.taskId,
-      payload?.rolloutPercent,
-    );
-    const workspace = releaseSnapshot.workspaces[payload?.regionId];
+  const deliverPublishedPlanToCompanion = (
+    releaseSnapshot,
+    regionId,
+    taskId,
+    exampleMode,
+  ) => {
+    const workspace = releaseSnapshot.workspaces[regionId];
     const planRelease = workspace?.planReleases.find(
-      (item) => item.taskId === payload?.taskId,
+      (item) => item.taskId === taskId && (item.exampleMode === true) === exampleMode,
     );
     const bundle = workspace?.bundles.find(
       (item) => item.id === planRelease?.bundleId,
@@ -745,6 +741,7 @@ function registerReleaseWorkspaceHandlers() {
         region: bundle.payload.region,
         plan: bundle.payload.plan,
         source: bundle.payload.source,
+        exampleMode,
       });
       notifyCompanionDataChanged(companionData);
       const nextRelease = latestRegionalReleaseMessage(companionData);
@@ -753,6 +750,33 @@ function registerReleaseWorkspaceHandlers() {
       }
     }
     return releaseSnapshot;
+  };
+  ipcMain.handle("release:publish-plan-to-agents", (_event, payload) => {
+    const releaseSnapshot = releaseWorkspaceStore.publishPlanToAgents(
+      payload?.regionId,
+      payload?.taskId,
+      payload?.rolloutPercent,
+    );
+    return deliverPublishedPlanToCompanion(
+      releaseSnapshot,
+      payload?.regionId,
+      payload?.taskId,
+      false,
+    );
+  });
+  ipcMain.handle("release:publish-example-plan", (_event, payload) => {
+    const releaseSnapshot = releaseWorkspaceStore.publishPlanToAgents(
+      payload?.regionId,
+      payload?.taskId,
+      100,
+      { exampleMode: true },
+    );
+    return deliverPublishedPlanToCompanion(
+      releaseSnapshot,
+      payload?.regionId,
+      payload?.taskId,
+      true,
+    );
   });
   ipcMain.handle("release:set-experiment-group-paused", (_event, payload) =>
     releaseWorkspaceStore.setExperimentGroupPaused(
@@ -821,6 +845,119 @@ function playerDataAfter(action) {
   return companionStore.getPlayerSnapshot();
 }
 
+function localMemoryCandidates(episodes) {
+  const candidates = [];
+  const rules = [
+    {
+      category: "preferred_name",
+      pattern: /(?:我叫|叫我|称呼我为)\s*([^\s，。！？,.!?]{1,16})/i,
+      title: "玩家希望使用的称呼",
+      tags: ["称呼"],
+    },
+    {
+      category: "explicit_preference",
+      pattern: /我(?:很|最|比较|特别)?(?:喜欢|爱|偏好)\s*([^，。！？,.!?]{1,40})/i,
+      title: "玩家明确表达的偏好",
+      tags: ["偏好"],
+    },
+    {
+      category: "interaction_habit",
+      pattern: /我(?:通常|一般|经常|习惯|喜欢在)\s*([^，。！？,.!?]{2,48})/i,
+      title: "玩家明确表达的习惯",
+      tags: ["习惯"],
+    },
+    {
+      category: "shared_experience",
+      pattern: /(?:记得|下次|以后)(?:咱们|我们|一起)\s*([^，。！？,.!?]{2,48})/i,
+      title: "与三月七约定的共同经历",
+      tags: ["共同经历"],
+    },
+  ];
+  for (const episode of episodes) {
+    for (const rule of rules) {
+      const summary = episode.userSummary.match(rule.pattern)?.[1]?.trim();
+      if (summary) {
+        candidates.push({
+          category: rule.category,
+          title: rule.title,
+          summary,
+          confidence: 0.82,
+          tags: rule.tags,
+        });
+        break;
+      }
+    }
+  }
+  return candidates.slice(0, 5);
+}
+
+function parseMemoryRefinement(content) {
+  const cleaned = String(content ?? "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/u, "")
+    .trim();
+  const parsed = JSON.parse(cleaned);
+  return Array.isArray(parsed) ? parsed : parsed.memories;
+}
+
+async function refineConversationMemory() {
+  if (memoryRefinementRunning) return;
+  const episodes = companionStore.getPendingMemoryEpisodes(12);
+  if (episodes.length === 0) return;
+  memoryRefinementRunning = true;
+  try {
+    let candidates;
+    const settings = aiSettingsStore.getPublicSettings();
+    if (settings.hasApiKey) {
+      try {
+        const result = await requestDeepSeekChat({
+          apiKey: aiSettingsStore.getApiKey(),
+          model: settings.model,
+          thinking: false,
+          systemPrompt:
+            "你是隐私优先的记忆提炼器。只提取玩家明确说出的稳定称呼、偏好、互动习惯或共同约定；不得推断健康、经济、家庭、身份、情绪或消费意愿。输出 JSON 数组，每项仅含 category、title、summary、confidence、tags；不确定则输出 []。",
+          messages: [
+            {
+              role: "user",
+              content: JSON.stringify(
+                episodes.map((episode) => ({
+                  id: episode.id,
+                  user: episode.userSummary,
+                })),
+              ),
+            },
+          ],
+        });
+        candidates = parseMemoryRefinement(result.content);
+      } catch {
+        candidates = localMemoryCandidates(episodes);
+      }
+    } else {
+      candidates = localMemoryCandidates(episodes);
+    }
+    companionStore.applyMemoryRefinement(
+      candidates,
+      episodes.map((episode) => episode.id),
+    );
+    notifyCompanionDataChanged(companionStore.getPlayerSnapshot());
+  } finally {
+    memoryRefinementRunning = false;
+  }
+}
+
+function scheduleMemoryRefinement() {
+  clearTimeout(memoryRefinementTimer);
+  const pending = companionStore.getPendingMemoryEpisodes(3);
+  if (pending.length >= 3) {
+    void refineConversationMemory();
+    return;
+  }
+  memoryRefinementTimer = setTimeout(
+    () => void refineConversationMemory(),
+    30_000,
+  );
+}
+
 function registerCompanionHandlers() {
   ipcMain.handle("companion:get-data", () =>
     companionStore.getPlayerSnapshot(),
@@ -863,6 +1000,11 @@ function registerCompanionHandlers() {
   ipcMain.handle("companion:set-memory-enabled", (_event, enabled) =>
     playerDataAfter(() => companionStore.setMemoryEnabled(enabled)),
   );
+  ipcMain.handle("companion:record-conversation-turn", (_event, payload) => {
+    const episode = companionStore.recordConversationTurn(payload);
+    if (episode) scheduleMemoryRefinement();
+    return companionStore.getPlayerSnapshot();
+  });
   ipcMain.handle("companion:propose-memory-candidate", (_event, payload) =>
     companionStore.proposeChatMemoryCandidate(
       payload?.text,
@@ -1428,7 +1570,33 @@ function createOperatorWindow() {
   });
 }
 
+function recoverPetRenderer(reason) {
+  if (!petWindow || petWindow.isDestroyed() || !petWindow.isVisible()) return;
+  cancelActiveTtsStreams();
+  petRendererHeartbeatAt = Date.now();
+  petRendererHeartbeatSeen = false;
+  console.warn(`Recovering pet renderer: ${reason}`);
+  petWindow.webContents.reloadIgnoringCache();
+}
+
+function startPetRendererWatchdog() {
+  clearInterval(petRendererWatchdog);
+  petRendererWatchdog = setInterval(() => {
+    if (
+      petWindow &&
+      !petWindow.isDestroyed() &&
+      petWindow.isVisible() &&
+      petRendererHeartbeatSeen &&
+      Date.now() - petRendererHeartbeatAt > 25_000
+    ) {
+      recoverPetRenderer("heartbeat_timeout");
+    }
+  }, 10_000);
+}
+
 function createPetWindow() {
+  petRendererHeartbeatAt = Date.now();
+  petRendererHeartbeatSeen = false;
   const storedState = windowStateStore.getSnapshot();
   windowMode = "pet";
   petDefaultScale = fitPetScaleToDisplay(
@@ -1494,7 +1662,16 @@ function createPetWindow() {
     petWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 
-  petWindow.once("ready-to-show", () => petWindow?.show());
+  petWindow.once("ready-to-show", () => {
+    petRendererHeartbeatAt = Date.now();
+    petWindow?.show();
+  });
+  petWindow.on("unresponsive", () =>
+    recoverPetRenderer("browser_window_unresponsive"),
+  );
+  petWindow.webContents.on("render-process-gone", (_event, details) =>
+    recoverPetRenderer(`render_process_gone:${details.reason}`),
+  );
   petWindow.on("move", scheduleWindowStateWrite);
   petWindow.on("resize", scheduleWindowStateWrite);
   petWindow.on("close", (event) => {
@@ -1692,6 +1869,19 @@ ipcMain.on("window:show-context-menu", (event) => {
     window: senderWindow,
   });
 });
+ipcMain.on("window:renderer-heartbeat", (event) => {
+  if (
+    petWindow &&
+    !petWindow.isDestroyed() &&
+    event.sender.id === petWindow.webContents.id
+  ) {
+    if (!petRendererHeartbeatSeen) {
+      console.log("Pet renderer heartbeat connected");
+    }
+    petRendererHeartbeatSeen = true;
+    petRendererHeartbeatAt = Date.now();
+  }
+});
 
 app.whenReady().then(() => {
   const windowStatePath = path.join(
@@ -1731,6 +1921,17 @@ app.whenReady().then(() => {
     filePath: path.join(app.getPath("userData"), "companion-data.json"),
     skillProfile: march7thSkillProfile,
   });
+  releaseSkillLoader = new ReleaseSkillLoader({
+    filePath: path.join(
+      __dirname,
+      "..",
+      "shared",
+      "skills",
+      "march7th-release",
+      "SKILL.md",
+    ),
+    watch: !app.isPackaged,
+  });
   companionDataPath = path.join(app.getPath("userData"), "companion-data.json");
   releaseWorkspaceStore = new ReleaseWorkspaceStore({
     filePath: path.join(app.getPath("userData"), "release-workspace.json"),
@@ -1760,6 +1961,7 @@ app.whenReady().then(() => {
   } else {
     createTray();
     createPetWindow();
+    startPetRendererWatchdog();
     startCompanionDataWatcher();
     if (isAllMode) createOperatorWindow();
   }
@@ -1783,6 +1985,9 @@ app.on("before-quit", () => {
   if (companionDataPath) fs.unwatchFile(companionDataPath);
   companionDataWatchStarted = false;
   clearTimeout(windowStateWriteTimer);
+  clearTimeout(memoryRefinementTimer);
+  clearInterval(petRendererWatchdog);
+  releaseSkillLoader?.close();
   if (windowStateStore) {
     persistWindowState();
   }

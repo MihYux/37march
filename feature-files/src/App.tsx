@@ -1,6 +1,7 @@
 import {
   lazy,
   Suspense,
+  type CSSProperties,
   useCallback,
   useEffect,
   useRef,
@@ -8,7 +9,6 @@ import {
 } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  BookmarkSimple,
   BookOpenText,
   Camera,
   ChatCircleDots,
@@ -29,7 +29,6 @@ import {
 } from "@phosphor-icons/react";
 import type {
   AiConversationMessage,
-  MemoryCandidateSummary,
   TtsPublicSettings,
   TtsStreamEvent,
 } from "./ai/types";
@@ -42,6 +41,7 @@ import {
   type MarchMood,
 } from "./character/march7th";
 import { CompanionOnboarding } from "./components/CompanionOnboarding";
+import { MainPanel, type PanelTab } from "./components/MainPanel";
 import type {
   CompanionData,
   DesktopRoute,
@@ -51,6 +51,7 @@ import type { CompanionOnboardingInput } from "./domain/types";
 import { createRendererPreviewData } from "./domain/preview-data";
 import { countUnreadDeliverableMessages } from "./domain/messages";
 import { derivePetActivity } from "./domain/pet-activity";
+import petWindowConfig from "../shared/pet-window-config.json";
 
 const AlbumPanel = lazy(() =>
   import("./components/AlbumPanel").then((module) => ({
@@ -83,6 +84,24 @@ interface Message {
 
 type ReplySource = "local" | "model" | "error";
 type VoiceState = "idle" | "synthesizing" | "speaking" | "error";
+
+const CHAT_HISTORY_TURN_LIMIT = 10;
+const CHAT_HISTORY_MESSAGE_LIMIT = CHAT_HISTORY_TURN_LIMIT * 2;
+
+const PET_DEFAULT_SCALE = petWindowConfig.defaultScale;
+const PET_MIN_SCALE =
+  PET_DEFAULT_SCALE * petWindowConfig.minMultiplier;
+const PET_MAX_SCALE =
+  PET_DEFAULT_SCALE * petWindowConfig.maxMultiplier;
+
+function normalizeRendererPetScale(
+  value: unknown,
+  fallback = PET_DEFAULT_SCALE,
+) {
+  const scale = Number(value);
+  if (!Number.isFinite(scale)) return fallback;
+  return Math.min(PET_MAX_SCALE, Math.max(PET_MIN_SCALE, scale));
+}
 
 interface ActiveVoiceSession {
   requestId: string;
@@ -177,7 +196,7 @@ function inferMood(text: string): MarchMood {
 }
 
 function toAiMessages(messages: Message[]): AiConversationMessage[] {
-  return messages.slice(-10).map((message) => ({
+  return messages.slice(-CHAT_HISTORY_MESSAGE_LIMIT).map((message) => ({
     role: message.role === "you" ? "user" : "assistant",
     content: message.text,
   }));
@@ -189,18 +208,15 @@ function App() {
     IDLE_LINES[0].text,
   );
   const [mood, setMood] = useState<MarchMood>(IDLE_LINES[0].mood);
-  const [chatOpen, setChatOpen] = useState(false);
-  const [albumOpen, setAlbumOpen] = useState(false);
-  const [communicationOpen, setCommunicationOpen] = useState(false);
-  const [companionSettingsOpen, setCompanionSettingsOpen] =
-    useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [windowMode, setWindowMode] = useState<"pet" | "panel">("pet");
+  const [petScale, setPetScale] = useState(PET_DEFAULT_SCALE);
+  const [petDefaultScale, setPetDefaultScale] =
+    useState(PET_DEFAULT_SCALE);
+  const [bubbleChatOpen, setBubbleChatOpen] = useState(false);
+  const [panelTab, setPanelTab] = useState<PanelTab>("model");
   const [input, setInput] = useState("");
   const [pinned, setPinned] = useState(true);
   const [modelReady, setModelReady] = useState(false);
-  const [memoryCandidate, setMemoryCandidate] =
-    useState<MemoryCandidateSummary | null>(null);
-  const [memoryDecisionBusy, setMemoryDecisionBusy] = useState(false);
   const [ttsSettings, setTtsSettings] =
     useState<TtsPublicSettings | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
@@ -219,12 +235,14 @@ function App() {
   ]);
   const nextMessageId = useRef(2);
   const inputRef = useRef<HTMLInputElement>(null);
+  const bubbleInputRef = useRef<HTMLInputElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const voiceSessionRef = useRef<ActiveVoiceSession | null>(null);
   const revealRunIdRef = useRef(0);
   const mountedRef = useRef(true);
   const windowDragRef = useRef<WindowDragSession | null>(null);
   const suppressCharacterClickUntilRef = useRef(0);
+  const lastReleaseChatMessageRef = useRef<string | null>(null);
   const [activeVoiceText, setActiveVoiceText] = useState("");
   const [companionData, setCompanionData] =
     useState<CompanionData | null>(null);
@@ -234,41 +252,39 @@ function App() {
   const [activityNow, setActivityNow] = useState(() => new Date());
 
   useEffect(() => {
-    if (chatOpen) {
+    if (windowMode === "panel" && panelTab === "chat") {
       inputRef.current?.focus();
     }
-  }, [chatOpen]);
+  }, [windowMode, panelTab]);
 
   useEffect(() => {
-    if (!chatOpen) return;
+    if (windowMode === "pet" && bubbleChatOpen) {
+      bubbleInputRef.current?.focus();
+    }
+  }, [bubbleChatOpen, windowMode]);
+
+  useEffect(() => {
+    if (windowMode !== "panel" || panelTab !== "chat") return;
     const messageList = messageListRef.current;
     if (messageList) {
       messageList.scrollTop = messageList.scrollHeight;
     }
-  }, [chatOpen, messages]);
+  }, [windowMode, panelTab, messages]);
 
   useEffect(() => {
-    if (
-      !chatOpen &&
-      !settingsOpen &&
-      !albumOpen &&
-      !communicationOpen &&
-      !companionSettingsOpen &&
-      !(
-        companionData &&
-        !companionData.profile.onboardingCompleted
-      )
-    ) {
+    const onboardingActive = Boolean(
+      companionData && !companionData.profile.onboardingCompleted,
+    );
+    if (windowMode !== "panel" && !onboardingActive) {
       return;
     }
 
     const handleOverlayKeyboard = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setChatOpen(false);
-        setSettingsOpen(false);
-        setAlbumOpen(false);
-        setCommunicationOpen(false);
-        setCompanionSettingsOpen(false);
+        if (windowMode === "panel") {
+          setWindowMode("pet");
+          void window.marchDesktop?.setMode("pet");
+        }
         return;
       }
 
@@ -310,14 +326,7 @@ function App() {
     window.addEventListener("keydown", handleOverlayKeyboard);
     return () =>
       window.removeEventListener("keydown", handleOverlayKeyboard);
-  }, [
-    albumOpen,
-    chatOpen,
-    communicationOpen,
-    companionSettingsOpen,
-    companionData,
-    settingsOpen,
-  ]);
+  }, [windowMode, companionData]);
 
   useEffect(() => {
     window.marchDesktop?.ai
@@ -344,6 +353,10 @@ function App() {
       .then((status) => {
         setDesktopStatus(status);
         setPinned(status.pinned);
+        setPetScale(normalizeRendererPetScale(status.petScale));
+        setPetDefaultScale(
+          normalizeRendererPetScale(status.petDefaultScale),
+        );
       })
       .catch(() => setDesktopStatus(null));
   }, []);
@@ -357,14 +370,33 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const reportHealth = () =>
+      window.marchDesktop?.reportRendererHeartbeat();
+    reportHealth();
+    const timer = window.setInterval(reportHealth, 5_000);
+    document.addEventListener("visibilitychange", reportHealth);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", reportHealth);
+    };
+  }, []);
+
+  useEffect(() => {
     const desktop = window.marchDesktop;
     if (!desktop) return;
     const openRoute = (route: DesktopRoute) => {
-      setChatOpen(false);
-      setSettingsOpen(false);
-      setAlbumOpen(route === "album");
-      setCommunicationOpen(route === "communication");
-      setCompanionSettingsOpen(route === "companion_settings");
+      const tabForRoute: PanelTab | null =
+        route === "album"
+          ? "album"
+          : route === "communication"
+            ? "communication"
+            : route === "companion_settings"
+              ? "companion"
+              : null;
+      if (!tabForRoute) return;
+      setPanelTab(tabForRoute);
+      setWindowMode("panel");
+      void window.marchDesktop?.setMode("panel");
     };
     desktop.onNavigate(openRoute);
     desktop.onCompanionDataChange(setCompanionData);
@@ -598,8 +630,7 @@ function App() {
         (automatic && !ttsSettings.autoPlay)
       ) {
         if (!automatic) {
-          setSettingsOpen(true);
-          setChatOpen(false);
+          openPanel("model");
         }
         return;
       }
@@ -666,6 +697,43 @@ function App() {
     },
     [startSpeech],
   );
+
+  useEffect(() => {
+    const releaseMessage = companionData?.messages.find(
+      (message) =>
+        Boolean(message.sentAt) &&
+        message.trace?.ruleIds?.includes("release.regional_plan_received"),
+    );
+    if (!releaseMessage) return;
+    if (lastReleaseChatMessageRef.current === releaseMessage.id) return;
+    if (
+      window.localStorage.getItem("march7:last-release-chat") ===
+      releaseMessage.id
+    ) {
+      lastReleaseChatMessageRef.current = releaseMessage.id;
+      return;
+    }
+    lastReleaseChatMessageRef.current = releaseMessage.id;
+    window.localStorage.setItem(
+      "march7:last-release-chat",
+      releaseMessage.id,
+    );
+    const messageId = nextMessageId.current++;
+    setMessages((current) =>
+      [
+        ...current,
+        {
+          id: messageId,
+          role: "march" as const,
+          text: releaseMessage.body,
+          speechText: releaseMessage.body,
+          mood: "soft" as const,
+        },
+      ].slice(-CHAT_HISTORY_MESSAGE_LIMIT),
+    );
+    setBubbleChatOpen(true);
+    speak(releaseMessage.body, "soft");
+  }, [companionData]);
 
   const registerPlayerInteraction = useCallback(() => {
     void window.marchDesktop?.companion
@@ -782,7 +850,10 @@ function App() {
     if (session.dragged) {
       void window.marchDesktop
         ?.endWindowMove()
-        .then(setDesktopStatus)
+        .then((status) => {
+          setDesktopStatus(status);
+          setPetScale(normalizeRendererPetScale(status.petScale));
+        })
         .catch(() => {});
     }
   };
@@ -818,25 +889,18 @@ function App() {
     void playSpeech(reply.text, reply.mood);
   };
 
-  const takePhoto = () => {
+  const takePhoto = async () => {
     registerPlayerInteraction();
     const reply = getMarchReply("拍照");
     speak(reply.text, reply.mood);
     void playSpeech(reply.text, reply.mood);
-    setPendingPhoto(true);
-  };
-
-  const savePhotoToAlbum = async () => {
     const api = window.marchDesktop?.companion;
     if (!api) return;
+    // 立即拍照并保存；pendingPhoto 仅在保存期间短暂亮起作为"拍照中"状态反馈。
+    setPendingPhoto(true);
     try {
       const nextData = await api.createPhotoMemory();
       setCompanionData(nextData);
-      setPendingPhoto(false);
-      speak(
-        "收好啦！以后翻到这张的时候，可别假装忘了今天是和谁一起拍的哦。",
-        "proud",
-      );
     } catch (error) {
       speak(
         error instanceof Error
@@ -844,6 +908,8 @@ function App() {
           : "欸，照片刚才没存好。再试一次嘛。",
         "soft",
       );
+    } finally {
+      setPendingPhoto(false);
     }
   };
 
@@ -858,7 +924,9 @@ function App() {
       text: cleanInput,
     };
     registerPlayerInteraction();
-    const nextConversation = [...messages, userMessage].slice(-10);
+    const nextConversation = [...messages, userMessage].slice(
+      -CHAT_HISTORY_MESSAGE_LIMIT,
+    );
 
     setMessages(nextConversation);
     setInput("");
@@ -869,7 +937,6 @@ function App() {
     let replyText = "";
     let replyMood: MarchMood = "bright";
     let source: ReplySource = "local";
-    let nextMemoryCandidate: MemoryCandidateSummary | undefined;
 
     if (window.marchDesktop?.ai && modelReady) {
       try {
@@ -883,7 +950,6 @@ function App() {
             result.model === "local-safety-guard"
               ? "local"
               : "model";
-          nextMemoryCandidate = result.memoryCandidate;
         } else {
           const fallback = getMarchReply(cleanInput);
           replyText = fallback.text;
@@ -902,26 +968,6 @@ function App() {
       replyMood = fallback.mood;
     }
 
-    if (!nextMemoryCandidate) {
-      const proposed =
-        await window.marchDesktop?.companion
-          ?.proposeMemoryCandidate(
-            cleanInput,
-            `chat-message-${userMessage.id}`,
-          )
-          .catch(() => undefined);
-      if (proposed) {
-        nextMemoryCandidate = {
-          id: proposed.id,
-          title: proposed.title,
-          summary: proposed.summary,
-          characterText: proposed.characterText,
-          category: proposed.category,
-        };
-      }
-    }
-    setMemoryCandidate(nextMemoryCandidate ?? null);
-
     const marchMessage: Message = {
       id: nextMessageId.current++,
       role: "march",
@@ -929,30 +975,24 @@ function App() {
       speechText: replyText,
       mood: replyMood,
     };
-    setMessages((current) => [...current, marchMessage].slice(-10));
+    const savedData = await window.marchDesktop?.companion
+      ?.recordConversationTurn({
+        conversationId: "desktop-chat",
+        turnId: `chat-message-${userMessage.id}`,
+        userText: cleanInput,
+        assistantText: replyText,
+        replySource: source,
+      })
+      .catch(() => undefined);
+    if (savedData) setCompanionData(savedData);
+
+    setMessages((current) =>
+      [...current, marchMessage].slice(-CHAT_HISTORY_MESSAGE_LIMIT),
+    );
     setReplySource(source);
     void playSpeech(replyText, replyMood);
     await revealReply(marchMessage.id, replyText, replyMood);
     setSending(false);
-  };
-
-  const resolveMemoryCandidate = async (confirmed: boolean) => {
-    const api = window.marchDesktop?.companion;
-    if (!api || !memoryCandidate || memoryDecisionBusy) return;
-    setMemoryDecisionBusy(true);
-    try {
-      const nextData = await api.resolveMemoryCandidate(
-        memoryCandidate.id,
-        confirmed,
-      );
-      setCompanionData(nextData);
-      if (confirmed) {
-        speak("好，咱记住啦。你随时都可以在相册里改主意。", "soft");
-      }
-      setMemoryCandidate(null);
-    } finally {
-      setMemoryDecisionBusy(false);
-    }
   };
 
   const togglePin = async () => {
@@ -970,58 +1010,38 @@ function App() {
     );
   };
 
-  const enableClickThrough = async () => {
+
+  const openPanel = (tab: PanelTab) => {
+    setPanelTab(tab);
+    setWindowMode("panel");
+    void window.marchDesktop?.setMode("panel");
+  };
+
+  const closePanel = () => {
+    setWindowMode("pet");
+    void window.marchDesktop
+      ?.setMode("pet")
+      .then((status) => {
+        setDesktopStatus(status);
+        setPetScale(normalizeRendererPetScale(status.petScale));
+      })
+      .catch(() => {});
+  };
+
+  const updatePetDefaultScale = async (scale: number) => {
+    const nextScale = normalizeRendererPetScale(scale);
     const desktop = window.marchDesktop;
-    if (!desktop) return;
-    try {
-      const status = await desktop.setClickThrough(true);
-      setDesktopStatus(status);
-      if (status.ok === false && status.error) {
-        speak(status.error, "soft");
-      }
-    } catch {
-      speak("点击穿透没有开启，请从托盘菜单再试一次。", "soft");
+    if (!desktop) {
+      setPetDefaultScale(nextScale);
+      setPetScale(nextScale);
+      return;
     }
-  };
-
-  const toggleSettings = () => {
-    setSettingsOpen((open) => !open);
-    setChatOpen(false);
-    setAlbumOpen(false);
-    setCommunicationOpen(false);
-    setCompanionSettingsOpen(false);
-  };
-
-  const toggleChat = () => {
-    setChatOpen((open) => !open);
-    setSettingsOpen(false);
-    setAlbumOpen(false);
-    setCommunicationOpen(false);
-    setCompanionSettingsOpen(false);
-  };
-
-  const toggleAlbum = () => {
-    setAlbumOpen((open) => !open);
-    setChatOpen(false);
-    setSettingsOpen(false);
-    setCommunicationOpen(false);
-    setCompanionSettingsOpen(false);
-  };
-
-  const toggleCommunication = () => {
-    setCommunicationOpen((open) => !open);
-    setChatOpen(false);
-    setSettingsOpen(false);
-    setAlbumOpen(false);
-    setCompanionSettingsOpen(false);
-  };
-
-  const toggleCompanionSettings = () => {
-    setCompanionSettingsOpen((open) => !open);
-    setChatOpen(false);
-    setSettingsOpen(false);
-    setAlbumOpen(false);
-    setCommunicationOpen(false);
+    const status = await desktop.setPetDefaultScale(nextScale);
+    setDesktopStatus(status);
+    setPetDefaultScale(
+      normalizeRendererPetScale(status.petDefaultScale, nextScale),
+    );
+    setPetScale(normalizeRendererPetScale(status.petScale, nextScale));
   };
 
   const toggleVoice = async () => {
@@ -1031,11 +1051,7 @@ function App() {
       !ttsSettings.hasApiKey ||
       !ttsSettings.voiceRightsConfirmed
     ) {
-      setSettingsOpen(true);
-      setChatOpen(false);
-      setAlbumOpen(false);
-      setCommunicationOpen(false);
-      setCompanionSettingsOpen(false);
+      openPanel("model");
       return;
     }
 
@@ -1066,6 +1082,14 @@ function App() {
               : modelReady
                 ? "DeepSeek 已就绪 · 对话会发送至模型服务"
                 : "未配置模型，正在使用本地回复";
+  const renderedPetScale = normalizeRendererPetScale(petScale);
+  const renderedPetDefaultScale = normalizeRendererPetScale(
+    petDefaultScale,
+  );
+  const renderedPetMaxScale = normalizeRendererPetScale(
+    desktopStatus?.petMaxScale,
+    PET_MAX_SCALE,
+  );
   const unreadMessageCount =
     companionData
       ? countUnreadDeliverableMessages(companionData.messages)
@@ -1074,15 +1098,11 @@ function App() {
     data: companionData,
     now: activityNow,
     pendingPhoto,
-    albumOpen,
+    albumOpen: windowMode === "panel" && panelTab === "album",
     unreadMessages: unreadMessageCount,
   });
   const modalActive =
-    chatOpen ||
-    settingsOpen ||
-    albumOpen ||
-    communicationOpen ||
-    companionSettingsOpen ||
+    windowMode === "panel" ||
     Boolean(
       companionData && !companionData.profile.onboardingCompleted,
     );
@@ -1132,9 +1152,41 @@ function App() {
     setCompanionData(preview);
   };
 
+  const petStageNode = (
+    <section
+      className={`pet-stage ${
+        voiceState === "speaking" ? "is-speaking" : ""
+      }`}
+    >
+      <button
+        className="character-button"
+        type="button"
+        aria-label="和三月七打招呼"
+        title="单击互动，也可以拖动窗口"
+        onClick={surpriseMe}
+      >
+        <img
+          src="./assets/march7th-pet.png"
+          alt="手持相机、挥手打招呼的三月七 Q 版桌宠"
+          draggable={false}
+        />
+      </button>
+    </section>
+  );
+
   return (
     <main
       className={`desktop-pet-shell pet-state-${petActivity.state}`}
+      data-mode={windowMode}
+      style={
+        windowMode === "pet"
+          ? ({
+              "--pet-scale": renderedPetScale,
+              "--pet-base-width": `${petWindowConfig.baseWidth}px`,
+              "--pet-base-height": `${petWindowConfig.baseHeight}px`,
+            } as CSSProperties)
+          : undefined
+      }
       aria-label="三月七桌面伙伴"
       onPointerDown={beginWindowDrag}
       onPointerMove={moveWindowDrag}
@@ -1150,245 +1202,272 @@ function App() {
         aria-label="拖动桌宠窗口"
         aria-hidden={modalActive}
         inert={modalActive}
-      >
-        <span />
-      </div>
+      />
 
-      <nav
-        className="window-controls"
-        aria-label="窗口控制"
-        aria-hidden={modalActive}
-        inert={modalActive}
-      >
-        <button
-          className={`icon-button ${settingsOpen ? "selected" : ""}`}
-          type="button"
-          title="模型设置"
-          aria-label="模型设置"
-          onClick={toggleSettings}
-        >
-          <GearSix weight={settingsOpen ? "fill" : "regular"} />
-        </button>
-        <button
-          className={`icon-button ${
-            ttsSettings?.enabled &&
-            ttsSettings.hasApiKey &&
-            ttsSettings.voiceRightsConfirmed
-              ? "selected"
-              : ""
-          }`}
-          type="button"
-          title={
-            !ttsSettings?.hasApiKey ||
-            !ttsSettings.voiceRightsConfirmed
-              ? "设置 CosyVoice 语音"
-              : ttsSettings.enabled
-                ? "关闭语音"
-                : "开启语音"
-          }
-          aria-label={
-            !ttsSettings?.hasApiKey ||
-            !ttsSettings.voiceRightsConfirmed
-              ? "设置语音"
-              : ttsSettings.enabled
-                ? "关闭语音"
-                : "开启语音"
-          }
-          disabled={!window.marchDesktop?.tts}
-          onClick={toggleVoice}
-        >
-          {ttsSettings?.enabled &&
-          ttsSettings.hasApiKey &&
-          ttsSettings.voiceRightsConfirmed ? (
-            <SpeakerHigh weight="fill" />
-          ) : (
-            <SpeakerSlash />
-          )}
-        </button>
-        <button
-          className="icon-button"
-          type="button"
-          title={
-            desktopStatus?.trayAvailable
-              ? "开启点击穿透（从系统托盘恢复）"
-              : "系统托盘不可用，不能安全开启点击穿透"
-          }
-          aria-label="开启点击穿透"
-          disabled={
-            !window.marchDesktop ||
-            desktopStatus?.trayAvailable !== true
-          }
-          onClick={() => void enableClickThrough()}
-        >
-          <CursorClick />
-        </button>
-        <button
-          className="icon-button"
-          type="button"
-          title={pinned ? "取消置顶" : "保持置顶"}
-          aria-label={pinned ? "取消置顶" : "保持置顶"}
-          onClick={togglePin}
-        >
-          {pinned ? <PushPin weight="fill" /> : <PushPinSlash />}
-        </button>
-        <button
-          className="icon-button"
-          type="button"
-          title="最小化"
-          aria-label="最小化"
-          onClick={() => window.marchDesktop?.minimize()}
-        >
-          <Minus weight="bold" />
-        </button>
-        <button
-          className="icon-button close-button"
-          type="button"
-          title="关闭"
-          aria-label="关闭"
-          onClick={() => window.marchDesktop?.close()}
-        >
-          <X weight="bold" />
-        </button>
-      </nav>
+      {windowMode === "pet" && (
+        <nav className="window-controls" aria-label="窗口控制">
+          <button
+            className="icon-button"
+            type="button"
+            title="设置"
+            aria-label="设置"
+            onClick={() => openPanel("model")}
+          >
+            <GearSix weight="regular" />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            title="最小化"
+            aria-label="最小化"
+            onClick={() => window.marchDesktop?.minimize()}
+          >
+            <Minus weight="bold" />
+          </button>
+          <button
+            className="icon-button close-button"
+            type="button"
+            title="关闭"
+            aria-label="关闭"
+            onClick={() => window.marchDesktop?.close()}
+          >
+            <X weight="bold" />
+          </button>
+        </nav>
+      )}
 
-      <section
-        className="speech-area"
-        aria-live="polite"
-        aria-hidden={modalActive}
-        inert={modalActive}
-      >
-        <motion.div
-          className={`speech-bubble mood-${mood} ${
-            revealing ? "is-revealing" : ""
-          }`}
-          key={revealing ? "revealing-reply" : bubble}
-          initial={{ opacity: 0, y: 8, scale: 0.97 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          transition={{ type: "spring", stiffness: 360, damping: 24 }}
+      {windowMode === "pet" && (
+        <section
+          className="speech-area"
+          aria-live="polite"
+          aria-hidden={modalActive}
+          inert={modalActive}
         >
-          <div className="bubble-meta">
-            <span>三月七</span>
-            <div className="bubble-actions">
-              <span className="mood-chip">
-                <Sparkle weight="fill" />
-                {moodLabel[mood]}
-              </span>
-              <SpeechPlayButton
-                text={bubbleSpeechText}
-                activeText={activeVoiceText}
-                voiceState={voiceState}
-                configured={Boolean(
-                  ttsSettings?.hasApiKey &&
-                    ttsSettings.enabled &&
-                    ttsSettings.voiceRightsConfirmed,
-                )}
-                desktopAvailable={Boolean(window.marchDesktop?.tts)}
-                className="bubble-speech-button"
-                onToggle={() =>
-                  toggleSpeech(bubbleSpeechText, mood)
-                }
-              />
+          <motion.div
+            className={`speech-bubble mood-${mood} ${
+              revealing ? "is-revealing" : ""
+            }`}
+            key={
+              bubbleChatOpen
+                ? "bubble-chat-open"
+                : revealing
+                  ? "revealing-reply"
+                  : bubble
+            }
+            initial={{ opacity: 0, y: 8, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ type: "spring", stiffness: 360, damping: 24 }}
+          >
+            <div className="bubble-meta">
+              <span>三月七</span>
+              <div className="bubble-actions">
+                <span className="mood-chip">
+                  <Sparkle weight="fill" />
+                  {moodLabel[mood]}
+                </span>
+                <span className="status-pill" title={petActivity.detail}>
+                  {petActivity.label}
+                </span>
+                <button
+                  className={`bubble-chat-toggle ${
+                    bubbleChatOpen ? "active" : ""
+                  }`}
+                  type="button"
+                  aria-label="在气泡中对话"
+                  aria-expanded={bubbleChatOpen}
+                  onClick={() =>
+                    setBubbleChatOpen((current) => !current)
+                  }
+                >
+                  <ChatCircleDots weight="fill" />
+                  对话
+                </button>
+                <SpeechPlayButton
+                  text={bubbleSpeechText}
+                  activeText={activeVoiceText}
+                  voiceState={voiceState}
+                  configured={Boolean(
+                    ttsSettings?.hasApiKey &&
+                      ttsSettings.enabled &&
+                      ttsSettings.voiceRightsConfirmed,
+                  )}
+                  desktopAvailable={Boolean(window.marchDesktop?.tts)}
+                  className="bubble-speech-button"
+                  onToggle={() => toggleSpeech(bubbleSpeechText, mood)}
+                />
+              </div>
             </div>
-          </div>
-          <p>{bubble}</p>
-        </motion.div>
-      </section>
-
-      <section
-        className={`pet-stage ${
-          voiceState === "speaking" ? "is-speaking" : ""
-        }`}
-        aria-hidden={modalActive}
-        inert={modalActive}
-      >
-        <div
-          className={`desktop-state-chip ${
-            petActivity.quiet ? "quiet" : ""
-          }`}
-          title={petActivity.detail}
-          aria-label={`桌宠状态：${petActivity.label}`}
-        >
-          <span />
-          {petActivity.label}
-        </div>
-        <motion.button
-          className="character-button"
-          type="button"
-          aria-label="和三月七打招呼"
-          title="单击互动，也可以拖动窗口"
-          onClick={surpriseMe}
-          whileHover={{ y: -2, scale: 1.025 }}
-          transition={{ duration: 0.18 }}
-          whileTap={{ scale: 0.985 }}
-        >
-          <img
-            src="./assets/march7th-pet.png"
-            alt="手持相机、挥手打招呼的三月七 Q 版桌宠"
-            draggable={false}
-          />
-        </motion.button>
-
-        <div className="quick-actions" aria-label="快捷互动">
-          <button type="button" onClick={takePhoto}>
-            <Camera weight="fill" />
-            拍照
-          </button>
-          <button
-            type="button"
-            className={albumOpen ? "active" : ""}
-            disabled={!companionData}
-            onClick={toggleAlbum}
-          >
-            <BookOpenText weight="fill" />
-            相册
-          </button>
-          <button
-            type="button"
-            className={communicationOpen ? "active" : ""}
-            disabled={!companionData}
-            onClick={toggleCommunication}
-          >
-            <EnvelopeSimple weight="fill" />
-            通信
-            {unreadMessageCount > 0 && (
-              <span
-                className="quick-action-badge"
-                aria-label={`${unreadMessageCount} 条未读通信`}
+            <p>{bubble}</p>
+            {bubbleChatOpen && (
+              <form
+                className="bubble-chat-form"
+                onSubmit={submitMessage}
               >
-                {unreadMessageCount}
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            className={companionSettingsOpen ? "active" : ""}
-            disabled={!companionData}
-            onClick={toggleCompanionSettings}
-          >
-            <SlidersHorizontal weight="bold" />
-            同行
-          </button>
-          {pendingPhoto && (
-            <button
-              type="button"
-              className="save-photo-action"
-              disabled={!window.marchDesktop?.companion}
-              onClick={() => void savePhotoToAlbum()}
-            >
-              <BookmarkSimple weight="fill" />
-              收进相册
-            </button>
+                <input
+                  ref={bubbleInputRef}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  maxLength={120}
+                  disabled={sending}
+                  aria-label="在气泡中输入消息"
+                  placeholder="想和咱说什么？"
+                />
+                <button
+                  type="submit"
+                  disabled={sending || !input.trim()}
+                  aria-label="发送消息"
+                >
+                  {sending ? (
+                    <SpinnerGap className="spin" />
+                  ) : (
+                    <PaperPlaneTilt weight="fill" />
+                  )}
+                </button>
+              </form>
+            )}</motion.div>
+        </section>
+      )}
+
+      {windowMode === "pet" && petStageNode}
+
+      {windowMode === "panel" && (
+        <MainPanel
+          tab={panelTab}
+          onTabChange={setPanelTab}
+          voiceEnabled={Boolean(
+            ttsSettings?.enabled &&
+              ttsSettings.hasApiKey &&
+              ttsSettings.voiceRightsConfirmed,
           )}
-          <button
-            type="button"
-            className={chatOpen ? "active" : ""}
-            onClick={toggleChat}
-          >
-            <ChatCircleDots weight="fill" />
-            聊天
-          </button>
-        </div>
-      </section>
+          voiceConfigured={Boolean(
+            ttsSettings?.hasApiKey && ttsSettings.voiceRightsConfirmed,
+          )}
+          onToggleVoice={toggleVoice}
+          pinned={pinned}
+          onTogglePin={togglePin}
+          onTakePhoto={takePhoto}
+          petSlot={petStageNode}
+          unreadCount={unreadMessageCount}
+          canUseCompanion={Boolean(companionData)}
+          onClose={closePanel}
+          onMinimize={() => window.marchDesktop?.minimize()}
+          onWindowClose={() => window.marchDesktop?.close()}
+        >
+          {panelTab === "chat" && (
+            <section className="chat-panel embedded" aria-label="和三月七聊天">
+              <header className="chat-panel-header">
+                <span>{modelReady ? "DeepSeek 对话" : "本地对话"}</span>
+              </header>
+              <div ref={messageListRef} className="message-list">
+                {messages.slice(-CHAT_HISTORY_MESSAGE_LIMIT).map((message) =>
+                  message.role === "march" ? (
+                    <div
+                      key={message.id}
+                      className="message-row march"
+                    >
+                      <p
+                        className={`message march ${
+                          revealingMessageId === message.id
+                            ? "is-revealing"
+                            : ""
+                        }`}
+                      >
+                        {message.text}
+                      </p>
+                      <SpeechPlayButton
+                        text={message.speechText ?? message.text}
+                        activeText={activeVoiceText}
+                        voiceState={voiceState}
+                        configured={Boolean(
+                          ttsSettings?.hasApiKey &&
+                            ttsSettings.enabled &&
+                            ttsSettings.voiceRightsConfirmed,
+                        )}
+                        desktopAvailable={Boolean(
+                          window.marchDesktop?.tts,
+                        )}
+                        className="message-speech-button"
+                        onToggle={() =>
+                          toggleSpeech(
+                            message.speechText ?? message.text,
+                            message.mood ??
+                              inferMood(
+                                message.speechText ?? message.text,
+                              ),
+                          )
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <p key={message.id} className="message you">
+                      {message.text}
+                    </p>
+                  ),
+                )}
+              </div>
+              <form className="chat-form" onSubmit={submitMessage}>
+                <input
+                  ref={inputRef}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  maxLength={120}
+                  disabled={sending}
+                  aria-label="想和三月七说什么"
+                  placeholder="想和咱说什么？"
+                />
+                <button type="submit" disabled={sending} aria-label="发送">
+                  {sending ? (
+                    <SpinnerGap className="spin" />
+                  ) : (
+                    <PaperPlaneTilt weight="fill" />
+                  )}
+                </button>
+              </form>
+              <p className={`local-note source-${replySource}`}>
+                {statusText}
+              </p>
+            </section>
+          )}
+
+          {panelTab === "album" && companionData && (
+            <AlbumPanel
+              data={companionData}
+              onClose={closePanel}
+              onDataChange={setCompanionData}
+            />
+          )}
+
+          {panelTab === "communication" && companionData && (
+            <CommunicationCenter
+              data={companionData}
+              onClose={closePanel}
+              onDataChange={setCompanionData}
+              onOpenAlbum={() => setPanelTab("album")}
+            />
+          )}
+
+          {panelTab === "companion" && companionData && (
+            <CompanionSettingsPanel
+              data={companionData}
+              desktopStatus={desktopStatus}
+              onClose={closePanel}
+              onDataChange={setCompanionData}
+              onDesktopStatusChange={setDesktopStatus}
+            />
+          )}
+
+          {panelTab === "model" && (
+            <ModelSettingsPanel
+              onClose={closePanel}
+              onReadyChange={handleModelReadyChange}
+              onTtsSettingsChange={handleTtsSettingsChange}
+              petDefaultScale={renderedPetDefaultScale}
+              petMaxScale={renderedPetMaxScale}
+              onPetDefaultScaleChange={updatePetDefaultScale}
+            />
+          )}
+        </MainPanel>
+      )}
 
       <Suspense fallback={null}>
         <AnimatePresence>
@@ -1396,168 +1475,6 @@ function App() {
             !companionData.profile.onboardingCompleted && (
               <CompanionOnboarding onComplete={completeOnboarding} />
             )}
-
-          {chatOpen && (
-          <motion.section
-            className="chat-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-label="和三月七聊天"
-            initial={{ opacity: 0, y: 24, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 18, scale: 0.97 }}
-            transition={{ type: "spring", stiffness: 360, damping: 28 }}
-          >
-            <header className="chat-panel-header">
-              <span>{modelReady ? "DeepSeek 对话" : "本地对话"}</span>
-              <button
-                type="button"
-                className="chat-panel-close"
-                aria-label="关闭聊天"
-                title="关闭聊天"
-                onClick={() => setChatOpen(false)}
-              >
-                <X weight="bold" />
-              </button>
-            </header>
-            <div ref={messageListRef} className="message-list">
-              {messages.slice(-5).map((message) =>
-                message.role === "march" ? (
-                  <div
-                    key={message.id}
-                    className="message-row march"
-                  >
-                    <p
-                      className={`message march ${
-                        revealingMessageId === message.id
-                          ? "is-revealing"
-                          : ""
-                      }`}
-                    >
-                      {message.text}
-                    </p>
-                    <SpeechPlayButton
-                      text={message.speechText ?? message.text}
-                      activeText={activeVoiceText}
-                      voiceState={voiceState}
-                      configured={Boolean(
-                        ttsSettings?.hasApiKey &&
-                          ttsSettings.enabled &&
-                          ttsSettings.voiceRightsConfirmed,
-                      )}
-                      desktopAvailable={Boolean(
-                        window.marchDesktop?.tts,
-                      )}
-                      className="message-speech-button"
-                      onToggle={() =>
-                        toggleSpeech(
-                          message.speechText ?? message.text,
-                          message.mood ??
-                            inferMood(
-                              message.speechText ?? message.text,
-                            ),
-                        )
-                      }
-                    />
-                  </div>
-                ) : (
-                  <p
-                    key={message.id}
-                    className="message you"
-                  >
-                    {message.text}
-                  </p>
-                ),
-              )}
-            </div>
-            {memoryCandidate && (
-              <aside className="memory-candidate-card" aria-live="polite">
-                <div>
-                  <strong>{memoryCandidate.title}</strong>
-                  <p>{memoryCandidate.summary}</p>
-                  <small>确认前不会进入长期记忆，也不会用于发行内容。</small>
-                </div>
-                <div>
-                  <button
-                    type="button"
-                    disabled={memoryDecisionBusy}
-                    onClick={() => void resolveMemoryCandidate(false)}
-                  >
-                    不保存
-                  </button>
-                  <button
-                    type="button"
-                    className="confirm"
-                    disabled={memoryDecisionBusy}
-                    onClick={() => void resolveMemoryCandidate(true)}
-                  >
-                    让咱记住
-                  </button>
-                </div>
-              </aside>
-            )}
-            <form className="chat-form" onSubmit={submitMessage}>
-              <input
-                ref={inputRef}
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                maxLength={120}
-                disabled={sending}
-                aria-label="想和三月七说什么"
-                placeholder="想和咱说什么？"
-              />
-              <button type="submit" disabled={sending} aria-label="发送">
-                {sending ? (
-                  <SpinnerGap className="spin" />
-                ) : (
-                  <PaperPlaneTilt weight="fill" />
-                )}
-              </button>
-            </form>
-            <p className={`local-note source-${replySource}`}>
-              {statusText}
-            </p>
-          </motion.section>
-          )}
-
-          {settingsOpen && (
-          <ModelSettingsPanel
-            onClose={() => setSettingsOpen(false)}
-            onReadyChange={handleModelReadyChange}
-            onTtsSettingsChange={handleTtsSettingsChange}
-          />
-          )}
-
-          {albumOpen && companionData && (
-          <AlbumPanel
-            data={companionData}
-            onClose={() => setAlbumOpen(false)}
-            onDataChange={setCompanionData}
-          />
-          )}
-
-          {communicationOpen && companionData && (
-          <CommunicationCenter
-            data={companionData}
-            onClose={() => setCommunicationOpen(false)}
-            onDataChange={setCompanionData}
-            onOpenAlbum={() => {
-              setCommunicationOpen(false);
-              setAlbumOpen(true);
-            }}
-          />
-          )}
-
-          {companionSettingsOpen && companionData && (
-          <CompanionSettingsPanel
-            data={companionData}
-            desktopStatus={desktopStatus}
-            onClose={() => setCompanionSettingsOpen(false)}
-            onDataChange={setCompanionData}
-            onDesktopStatusChange={setDesktopStatus}
-          />
-          )}
-
         </AnimatePresence>
       </Suspense>
     </main>

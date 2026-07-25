@@ -75,6 +75,56 @@ const phaseLabels: Record<
   recall: "低频召回",
 };
 
+type CampaignWorkspace =
+  | "facts"
+  | "knowledge"
+  | "review"
+  | "content"
+  | "publish";
+
+const campaignWorkspaces: Array<{
+  id: CampaignWorkspace;
+  number: string;
+  title: string;
+  headline: string;
+  description: string;
+}> = [
+  {
+    id: "facts",
+    number: "01",
+    title: "任务信息",
+    headline: "先让系统准确理解，这次任务为何重要。",
+    description: "填写任务目标并锁定可引用事实。保存后，任何上游变更都会让旧审核失效。",
+  },
+  {
+    id: "knowledge",
+    number: "02",
+    title: "方案知识",
+    headline: "只让经过确认的事实，进入生成上下文。",
+    description: "导入方案并逐条审核。原始文档与内部知识不会进入玩家可读数据。",
+  },
+  {
+    id: "review",
+    number: "03",
+    title: "任务审核",
+    headline: "在启动任务前，确认每一项边界。",
+    description: "检查事实、时间、授权和联系策略，再由人工决定是否启动任务。",
+  },
+  {
+    id: "content",
+    number: "04",
+    title: "内容生成",
+    headline: "生成候选内容，由人完成最终判断。",
+    description: "模型只生成候选。自动检查与人工批准完成前，内容不会进入投递流程。",
+  },
+  {
+    id: "publish",
+    number: "05",
+    title: "发布投递",
+    headline: "从小范围开始，并保留随时停止的能力。",
+    description: "选择灰度范围，发布不可变内容包；实际投递前仍会重新检查玩家授权与频率。",
+  },
+];
 function campaignToDraft(
   campaign: CharacterCampaignTask,
 ): CampaignDraftInput {
@@ -178,12 +228,21 @@ export function CampaignStudioPanel({
   const [rolloutPercent, setRolloutPercent] =
     useState<5 | 25 | 100>(5);
   const [publisher, setPublisher] = useState("内部发行审核员");
+  const [activeWorkspace, setActiveWorkspace] =
+    useState<CampaignWorkspace>("facts");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     text: string;
   } | null>(null);
 
+  const activeWorkspaceIndex = campaignWorkspaces.findIndex(
+    (workspace) => workspace.id === activeWorkspace,
+  );
+  const activeWorkspaceMeta =
+    campaignWorkspaces[activeWorkspaceIndex] ?? campaignWorkspaces[0];
+  const previousWorkspace = campaignWorkspaces[activeWorkspaceIndex - 1];
+  const nextWorkspace = campaignWorkspaces[activeWorkspaceIndex + 1];
   const campaignMessages = useMemo(
     () =>
       data.messages.filter(
@@ -203,6 +262,7 @@ export function CampaignStudioPanel({
     setDraft(campaignToDraft(selectedCampaign));
     setSelectedMessageId("");
     setReviewNote("");
+    setActiveWorkspace("facts");
   }, [selectedCampaign?.id]);
 
   const updateText = (
@@ -476,16 +536,16 @@ export function CampaignStudioPanel({
       role="dialog"
       aria-modal="true"
       aria-label="角色发行沙盒"
-      initial={{ opacity: 0, y: 20, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 16, scale: 0.98 }}
-      transition={{ type: "spring", stiffness: 340, damping: 30 }}
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 6 }}
+      transition={{ duration: 0.46, ease: [0.16, 1, 0.3, 1] }}
     >
       <header className="campaign-studio-header">
         <div>
-          <span className="eyebrow">LOCAL CAMPAIGN SANDBOX · 不会对外发送</span>
-          <h2>角色发行沙盒</h2>
-          <p>固定事实 → 任务审核 → 内容审核 → 联系策略 → 通信中心</p>
+          <span className="eyebrow">REHOYO / RELEASE CONTROL</span>
+          <h2>发行控制台</h2>
+          <p>本地工作区 · 所有生成内容均需人工批准</p>
         </div>
         <button
           type="button"
@@ -507,7 +567,7 @@ export function CampaignStudioPanel({
             onClick={createCampaign}
           >
             <Plus weight="bold" />
-            新建模拟任务
+            新建发行任务
           </button>
           <div className="campaign-task-list">
             {data.campaigns.map((campaign) => (
@@ -529,21 +589,36 @@ export function CampaignStudioPanel({
 
         <div className="campaign-studio-scroll">
           <nav className="campaign-workflow" aria-label="发行工作流">
-            {[
-              ["01", "任务事实"],
-              ["02", "方案知识"],
-              ["03", "任务审核"],
-              ["04", "内容生成"],
-              ["05", "发布投递"],
-            ].map(([number, label]) => (
-              <span key={number}>
-                <b>{number}</b>
-                {label}
-              </span>
+            {campaignWorkspaces.map((workspace) => (
+              <button
+                key={workspace.id}
+                type="button"
+                className={workspace.id === activeWorkspace ? "active" : ""}
+                aria-current={
+                  workspace.id === activeWorkspace ? "step" : undefined
+                }
+                onClick={() => setActiveWorkspace(workspace.id)}
+              >
+                <b>{workspace.number}</b>
+                <span>{workspace.title}</span>
+              </button>
             ))}
           </nav>
+          <header className="campaign-page-header">
+            <div>
+              <span>
+                步骤 {activeWorkspaceMeta.number} / 05
+              </span>
+              <h3>{activeWorkspaceMeta.headline}</h3>
+              <p>{activeWorkspaceMeta.description}</p>
+            </div>
+            {nextWorkspace && (
+              <small>完成后继续：{nextWorkspace.title}</small>
+            )}
+          </header>
           {selectedCampaign ? (
             <>
+              {activeWorkspace === "facts" && (<>
               <section className="campaign-overview">
                 <div className="campaign-overview-title">
                   <div>
@@ -567,140 +642,175 @@ export function CampaignStudioPanel({
                   <strong>任务与固定事实</strong>
                   <span>保存后自动锁定事实，并使旧审核失效</span>
                 </div>
-                <div className="campaign-form-grid">
-                  <label>
-                    版本标识
-                    <input
-                      value={draft.version}
-                      maxLength={60}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        updateText("version", event.target.value)
-                      }
-                    />
-                  </label>
-                  <label>
-                    生成模式
-                    <select
-                      value={draft.generationMode}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          generationMode: event.target
-                            .value as CampaignGenerationMode,
-                        }))
-                      }
-                    >
-                      {Object.entries(generationModeLabels).map(
-                        ([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ),
-                      )}
-                    </select>
-                  </label>
-                  <label className="wide">
-                    全局主题
-                    <input
-                      value={draft.globalTheme}
-                      maxLength={100}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        updateText("globalTheme", event.target.value)
-                      }
-                    />
-                  </label>
-                  <label className="wide">
-                    叙事方式
-                    <textarea
-                      value={draft.narrativeApproach}
-                      maxLength={240}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        updateText(
-                          "narrativeApproach",
-                          event.target.value,
-                        )
-                      }
-                    />
-                  </label>
-                  <label>
-                    卖点（逗号分隔）
-                    <input
-                      value={draft.sellingPoints.join("，")}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          sellingPoints: event.target.value
-                            .split(/[，,]/)
-                            .map((item) => item.trim())
-                            .filter(Boolean),
-                        }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    分群（逗号分隔）
-                    <input
-                      value={draft.targetSegments.join("，")}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          targetSegments: event.target.value
-                            .split(/[，,]/)
-                            .map((item) => item.trim())
-                            .filter(Boolean),
-                        }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    锁定活动名称
-                    <input
-                      value={draft.fixedFacts.versionName}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        updateFact("versionName", event.target.value)
-                      }
-                    />
-                  </label>
-                  <label>
-                    锁定活动时间
-                    <input
-                      value={draft.fixedFacts.eventTime}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        updateFact("eventTime", event.target.value)
-                      }
-                    />
-                  </label>
-                  <label className="wide">
-                    锁定安全入口（仅 product://）
-                    <input
-                      value={draft.fixedFacts.actionTarget}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        updateFact("actionTarget", event.target.value)
-                      }
-                    />
-                  </label>
-                  <label className="wide">
-                    锁定奖励说明
-                    <input
-                      value={draft.fixedFacts.rewardStatement}
-                      disabled={!api || !editable || Boolean(busy)}
-                      onChange={(event) =>
-                        updateFact(
-                          "rewardStatement",
-                          event.target.value,
-                        )
-                      }
-                    />
-                  </label>
+                <div className="campaign-form-sections">
+                  <fieldset className="campaign-form-section">
+                    <legend>
+                      <span>01</span>
+                      <div>
+                        <strong>基础信息</strong>
+                        <small>定义版本名称和生成方式</small>
+                      </div>
+                    </legend>
+                    <div className="campaign-form-grid">
+                      <label>
+                        版本标识
+                        <input
+                          value={draft.version}
+                          maxLength={60}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            updateText("version", event.target.value)
+                          }
+                        />
+                      </label>
+                      <label>
+                        生成模式
+                        <select
+                          value={draft.generationMode}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              generationMode: event.target
+                                .value as CampaignGenerationMode,
+                            }))
+                          }
+                        >
+                          {Object.entries(generationModeLabels).map(
+                            ([value, label]) => (
+                              <option key={value} value={value}>
+                                {label}
+                              </option>
+                            ),
+                          )}
+                        </select>
+                      </label>
+                      <label className="wide">
+                        全局主题
+                        <input
+                          value={draft.globalTheme}
+                          maxLength={100}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            updateText("globalTheme", event.target.value)
+                          }
+                        />
+                      </label>
+                    </div>
+                  </fieldset>
+
+                  <fieldset className="campaign-form-section">
+                    <legend>
+                      <span>02</span>
+                      <div>
+                        <strong>内容策略</strong>
+                        <small>说明叙事方向、卖点和目标分群</small>
+                      </div>
+                    </legend>
+                    <div className="campaign-form-grid">
+                      <label className="wide">
+                        叙事方式
+                        <textarea
+                          value={draft.narrativeApproach}
+                          maxLength={240}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            updateText(
+                              "narrativeApproach",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </label>
+                      <label>
+                        卖点（逗号分隔）
+                        <input
+                          value={draft.sellingPoints.join("，")}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              sellingPoints: event.target.value
+                                .split(/[，,]/)
+                                .map((item) => item.trim())
+                                .filter(Boolean),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        分群（逗号分隔）
+                        <input
+                          value={draft.targetSegments.join("，")}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              targetSegments: event.target.value
+                                .split(/[，,]/)
+                                .map((item) => item.trim())
+                                .filter(Boolean),
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+                  </fieldset>
+
+                  <fieldset className="campaign-form-section">
+                    <legend>
+                      <span>03</span>
+                      <div>
+                        <strong>锁定事实</strong>
+                        <small>生成内容只能引用这里确认的信息</small>
+                      </div>
+                    </legend>
+                    <div className="campaign-form-grid">
+                      <label>
+                        活动名称
+                        <input
+                          value={draft.fixedFacts.versionName}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            updateFact("versionName", event.target.value)
+                          }
+                        />
+                      </label>
+                      <label>
+                        活动时间
+                        <input
+                          value={draft.fixedFacts.eventTime}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            updateFact("eventTime", event.target.value)
+                          }
+                        />
+                      </label>
+                      <label className="wide">
+                        安全入口（仅 product://）
+                        <input
+                          value={draft.fixedFacts.actionTarget}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            updateFact("actionTarget", event.target.value)
+                          }
+                        />
+                      </label>
+                      <label className="wide">
+                        奖励说明
+                        <input
+                          value={draft.fixedFacts.rewardStatement}
+                          disabled={!api || !editable || Boolean(busy)}
+                          onChange={(event) =>
+                            updateFact(
+                              "rewardStatement",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                  </fieldset>
                 </div>
                 <div className="campaign-editor-actions">
                   <button
@@ -724,7 +834,8 @@ export function CampaignStudioPanel({
                   )}
                 </div>
               </section>
-
+              </>)}
+              {activeWorkspace === "knowledge" && (<>
               <section className="campaign-knowledge-panel">
                 <div className="campaign-section-title">
                   <FileText weight="fill" />
@@ -795,8 +906,22 @@ export function CampaignStudioPanel({
                   )}
                 </div>
               </section>
-
-              <section className="campaign-publish-panel">
+              </>)}
+              {activeWorkspace === "publish" && (<>
+              {!campaignMessages.some(
+                (message) => message.reviewStatus === "approved",
+              ) && (
+                <section className="campaign-step-guidance">
+                  <strong>发布前还缺少已批准内容</strong>
+                  <p>先去“内容生成”完成自动检查和人工批准，再回来发布内容包。</p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveWorkspace("content")}
+                  >
+                    返回内容生成
+                  </button>
+                </section>
+              )}              <section className="campaign-publish-panel">
                 <div className="campaign-section-title">
                   <LockKey weight="fill" />
                   <strong>发布与紧急控制</strong>
@@ -855,8 +980,20 @@ export function CampaignStudioPanel({
                   </button>
                 </div>
               </section>
-
-              <ReviewChecks
+              </>)}
+              {activeWorkspace === "review" && (<>
+              {!selectedCampaign.automaticReview && (
+                <section className="campaign-step-guidance">
+                  <strong>先运行任务自动检查</strong>
+                  <p>返回“任务信息”保存草稿并运行自动检查，检查通过后再进行人工审核。</p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveWorkspace("facts")}
+                  >
+                    返回任务信息
+                  </button>
+                </section>
+              )}              <ReviewChecks
                 title="任务自动检查"
                 review={selectedCampaign.automaticReview}
               />
@@ -915,7 +1052,7 @@ export function CampaignStudioPanel({
                       开始任务
                     </button>
                   )}
-                  {selectedCampaign.status === "running" && (
+              {selectedCampaign.status === "running" && (
                     <button
                       type="button"
                       disabled={!api || Boolean(busy)}
@@ -986,7 +1123,21 @@ export function CampaignStudioPanel({
                 </div>
               </section>
 
-              {selectedCampaign.status === "running" && (
+              </>)}
+              {activeWorkspace === "content" && (<>
+              {selectedCampaign.status !== "running" &&
+                campaignMessages.length === 0 && (
+                  <section className="campaign-step-guidance">
+                    <strong>任务尚未开始</strong>
+                    <p>先在“任务审核”中批准并启动任务，之后才能生成候选内容。</p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveWorkspace("review")}
+                    >
+                      前往任务审核
+                    </button>
+                  </section>
+                )}              {selectedCampaign.status === "running" && (
                 <section className="campaign-generator">
                   <div className="campaign-section-title">
                     <Sparkle weight="fill" />
@@ -1163,6 +1314,35 @@ export function CampaignStudioPanel({
                   )}
                 </section>
               )}
+              <nav className="campaign-page-actions" aria-label="页面导航">
+                <button
+                  type="button"
+                  disabled={!previousWorkspace}
+                  onClick={() =>
+                    previousWorkspace &&
+                    setActiveWorkspace(previousWorkspace.id)
+                  }
+                >
+                  {previousWorkspace
+                    ? `上一步：${previousWorkspace.title}`
+                    : "已经是第一步"}
+                </button>
+                <span>
+                  {activeWorkspaceMeta.number} / 05
+                </span>
+                <button
+                  type="button"
+                  className="next"
+                  disabled={!nextWorkspace}
+                  onClick={() =>
+                    nextWorkspace && setActiveWorkspace(nextWorkspace.id)
+                  }
+                >
+                  {nextWorkspace
+                    ? `下一步：${nextWorkspace.title}`
+                    : "流程已浏览完成"}
+                </button>
+              </nav>              </>)}
             </>
           ) : (
             <div className="campaign-empty">

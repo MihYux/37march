@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld("marchDesktop", {
   show: (route) => ipcRenderer.invoke("window:show", route),
   showContextMenu: () =>
     ipcRenderer.send("window:show-context-menu"),
+  reportRendererHeartbeat: () =>
+    ipcRenderer.send("window:renderer-heartbeat"),
   onNavigate: (callback) => {
     if (desktopNavigateListener) {
       ipcRenderer.removeListener(
@@ -85,6 +87,8 @@ contextBridge.exposeInMainWorld("marchDesktop", {
       }),
     setMemoryEnabled: (enabled) =>
       ipcRenderer.invoke("companion:set-memory-enabled", enabled),
+    recordConversationTurn: (input) =>
+      ipcRenderer.invoke("companion:record-conversation-turn", input),
     proposeMemoryCandidate: (text, sourceId) =>
       ipcRenderer.invoke("companion:propose-memory-candidate", {
         text,

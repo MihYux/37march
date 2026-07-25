@@ -18,6 +18,7 @@ export interface ReleaseOperatorApi {
   saveExperiment: (regionId: string, input: Record<string, unknown>) => Promise<ReleaseWorkspaceSnapshot>;
   publishToAgents: (regionId: string, directiveId: string, experimentId: string) => Promise<ReleaseWorkspaceSnapshot>;
   publishPlanToAgents: (regionId: string, taskId: string, rolloutPercent: number) => Promise<ReleaseWorkspaceSnapshot>;
+  publishExamplePlan: (regionId: string, taskId: string) => Promise<ReleaseWorkspaceSnapshot>;
   importMetrics: (regionId: string, experimentId: string, text: string) => Promise<ReleaseWorkspaceSnapshot>;
   importMetricsFile: (regionId: string, experimentId: string) => Promise<{ canceled: boolean; data: ReleaseWorkspaceSnapshot }>;
   setExperimentStage: (regionId: string, experimentId: string, action: "advance" | "pause" | "rollback" | "withdraw") => Promise<ReleaseWorkspaceSnapshot>;

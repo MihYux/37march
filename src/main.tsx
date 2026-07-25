@@ -6,6 +6,7 @@ import "./styles.css";
 import "./operator/release-workflow.css";
 import "./operator/release-region-data.css";
 import "./operator/release-plan-publish.css";
+import "./operator/release-optimization-dashboard.css";
 
 const isOperator =
   new URLSearchParams(window.location.search).get("surface") === "operator";

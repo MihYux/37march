@@ -2,7 +2,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { evaluateContactPolicy } = require("./contact-policy.cjs");
-const { extractMemoryCandidate } = require("./memory-candidates.cjs");
+const { reviewCharacterOutput } = require("./content-safety.cjs");
+const { containsSensitiveMemory, extractMemoryCandidate } = require("./memory-candidates.cjs");
 const {
   PHASE_TO_MESSAGE_TYPE,
   PHASE_TO_TEMPLATE,
@@ -21,9 +22,19 @@ const {
   getDemoScenarioSummaries,
 } = require("./demo-scenarios.cjs");
 
-const COMPANION_SCHEMA_VERSION = 2;
-const PREVIOUS_SCHEMA_VERSIONS = new Set([1, 2]);
+const COMPANION_SCHEMA_VERSION = 3;
+const PREVIOUS_SCHEMA_VERSIONS = new Set([1, 2, 3]);
+const EPISODE_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
+const MAX_CONVERSATION_EPISODES = 1_000;
 const MAX_COLLECTION_ITEMS = 2_000;
+const PLAYER_VISIBLE_TITLE_FALLBACK = "三月七想和你聊聊";
+const PLAYER_VISIBLE_MESSAGE_FALLBACK =
+  "开拓者，最近列车上多了件挺有意思的新鲜事。你有空、也正好想换换心情的时候，可以来看看；最近忙的话就先放着。";
+
+function sanitizePlayerVisibleText(value, fallback) {
+  const reviewed = reviewCharacterOutput(String(value ?? ""));
+  return reviewed.allowed ? reviewed.safeText : fallback;
+}
 const MESSAGE_RESPONSES = new Set([
   "like",
   "later",
@@ -451,6 +462,7 @@ function createDefaultCompanionData({
       paused: false,
     },
     memories: [],
+    conversationEpisodes: [],
     events: [],
     messages: [],
     campaigns: [
@@ -761,7 +773,56 @@ function normalizeCompanionData(input, { skillProfile, now }) {
         "由旧版共同记忆迁移；玩家可以随时关闭引用或删除。",
         240,
       ),
+      origin: memory.origin === "automatic" ? "automatic" : "explicit",
+      hidden: memory.hidden === true || memory.origin === "automatic",
+      confidence:
+        typeof memory.confidence === "number"
+          ? Math.max(0, Math.min(1, memory.confidence))
+          : memory.userConfirmed === true
+            ? 1
+            : 0.5,
+      lastReferencedAt: isIsoDate(memory.lastReferencedAt)
+        ? memory.lastReferencedAt
+        : undefined,
+      supersededBy:
+        typeof memory.supersededBy === "string"
+          ? memory.supersededBy
+          : undefined,
     })),
+    conversationEpisodes: (Array.isArray(input.conversationEpisodes)
+      ? input.conversationEpisodes
+      : []
+    )
+      .filter(
+        (episode) =>
+          isObject(episode) &&
+          typeof episode.id === "string" &&
+          isIsoDate(episode.createdAt) &&
+          Date.parse(episode.createdAt) >= Date.parse(now) - EPISODE_RETENTION_MS,
+      )
+      .slice(-MAX_CONVERSATION_EPISODES)
+      .map((episode) => ({
+        id: asShortString(episode.id, `episode-${randomUUID()}`, 120),
+        conversationId: asShortString(
+          episode.conversationId,
+          "desktop-chat",
+          120,
+        ),
+        turnId: asShortString(episode.turnId, episode.id, 120),
+        createdAt: episode.createdAt,
+        expiresAt: isIsoDate(episode.expiresAt)
+          ? episode.expiresAt
+          : new Date(Date.parse(episode.createdAt) + EPISODE_RETENTION_MS).toISOString(),
+        userSummary: asShortString(episode.userSummary, "", 280),
+        assistantSummary: asShortString(episode.assistantSummary, "", 280),
+        topics: asStringArray(episode.topics, [], 12),
+        replySource: ["model", "local", "error"].includes(episode.replySource)
+          ? episode.replySource
+          : "local",
+        refinedAt: isIsoDate(episode.refinedAt)
+          ? episode.refinedAt
+          : undefined,
+      })),
     events: asRecordArray(input.events, [
       "id",
       "trigger",
@@ -779,7 +840,17 @@ function normalizeCompanionData(input, { skillProfile, now }) {
       "createdAt",
       "eventId",
       "reviewStatus",
-    ]),
+    ]).map((message) => ({
+      ...message,
+      title: sanitizePlayerVisibleText(
+        message.title,
+        PLAYER_VISIBLE_TITLE_FALLBACK,
+      ),
+      body: sanitizePlayerVisibleText(
+        message.body,
+        PLAYER_VISIBLE_MESSAGE_FALLBACK,
+      ),
+    })),
     campaigns: asRecordArray(input.campaigns, [
       "id",
       "characterId",
@@ -1171,6 +1242,21 @@ class CompanionStore {
 
   getPlayerSnapshot() {
     const snapshot = this.getSnapshot();
+    snapshot.messages = snapshot.messages.map((message) => ({
+      ...message,
+      title: sanitizePlayerVisibleText(
+        message.title,
+        PLAYER_VISIBLE_TITLE_FALLBACK,
+      ),
+      body: sanitizePlayerVisibleText(
+        message.body,
+        PLAYER_VISIBLE_MESSAGE_FALLBACK,
+      ),
+    }));
+    snapshot.memories = snapshot.memories.filter(
+      (memory) => memory.hidden !== true,
+    );
+    snapshot.conversationEpisodes = [];
     snapshot.campaigns = snapshot.campaigns.map((campaign) => ({
       ...campaign,
       fixedFacts: {},
@@ -1237,6 +1323,201 @@ class CompanionStore {
       )
       .slice(0, Math.max(0, Math.min(3, limit)))
       .map(({ memory }) => clone(memory));
+  }
+
+  getRelevantMemoryContext(query = "", { durableLimit = 5, episodeLimit = 3 } = {}) {
+    if (
+      this.data.profile.memoryEnabled !== true ||
+      this.data.relationship.memoryEnabled !== true ||
+      this.data.profile.personalizationEnabled !== true
+    ) {
+      return { durable: [], episodes: [] };
+    }
+    const terms = [
+      ...new Set(
+        String(query)
+          .toLowerCase()
+          .split(/[\s，。！？、；：,.!?;:]+/)
+          .flatMap((term) => {
+            if (term.length < 2) return [];
+            const fragments = [term];
+            for (let index = 0; index < term.length - 1; index += 1) {
+              fragments.push(term.slice(index, index + 2));
+            }
+            return fragments;
+          }),
+      ),
+    ];
+    const scoreText = (value) =>
+      terms.reduce(
+        (score, term) => score + (String(value).toLowerCase().includes(term) ? 2 : 0),
+        0,
+      );
+    const durable = this.data.memories
+      .filter(
+        (memory) =>
+          memory.status === "confirmed" &&
+          memory.userConfirmed === true &&
+          memory.reusableByCharacter === true &&
+          !memory.supersededBy,
+      )
+      .map((memory) => ({
+        memory,
+        score:
+          scoreText(`${memory.title} ${memory.summary} ${(memory.tags ?? []).join(" ")}`) +
+          (memory.origin === "automatic" ? 1 : 2),
+      }))
+      .filter(({ score }) => score > 0)
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          Date.parse(right.memory.createdAt) - Date.parse(left.memory.createdAt),
+      )
+      .slice(0, Math.max(0, Math.min(5, durableLimit)))
+      .map(({ memory }) => clone(memory));
+    const episodes = [...this.data.conversationEpisodes]
+      .map((episode) => ({
+        episode,
+        score: scoreText(
+          `${episode.userSummary} ${episode.assistantSummary} ${episode.topics.join(" ")}`,
+        ),
+      }))
+      .filter(({ score }) => score > 0)
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          Date.parse(right.episode.createdAt) - Date.parse(left.episode.createdAt),
+      )
+      .slice(0, Math.max(0, Math.min(3, episodeLimit)))
+      .map(({ episode }) => clone(episode));
+    return { durable, episodes };
+  }
+
+  recordConversationTurn(input) {
+    let episode;
+    this.#commit((data) => {
+      if (
+        data.profile.memoryEnabled !== true ||
+        data.relationship.memoryEnabled !== true
+      ) {
+        return;
+      }
+      const userText = asShortString(input?.userText, "", 280);
+      const assistantText = asShortString(input?.assistantText, "", 280);
+      if (!userText || !assistantText) return;
+      const createdAt = data.demoNow;
+      episode = {
+        id: `episode-${randomUUID()}`,
+        conversationId: asShortString(input?.conversationId, "desktop-chat", 120),
+        turnId: asShortString(input?.turnId, `turn-${randomUUID()}`, 120),
+        createdAt,
+        expiresAt: new Date(Date.parse(createdAt) + EPISODE_RETENTION_MS).toISOString(),
+        userSummary: userText,
+        assistantSummary: assistantText,
+        topics: asStringArray(input?.topics, [], 12),
+        replySource: ["model", "local", "error"].includes(input?.replySource)
+          ? input.replySource
+          : "local",
+      };
+      data.conversationEpisodes.push(episode);
+      if (data.conversationEpisodes.length > MAX_CONVERSATION_EPISODES) {
+        data.conversationEpisodes = data.conversationEpisodes.slice(
+          -MAX_CONVERSATION_EPISODES,
+        );
+      }
+    });
+    return episode ? clone(episode) : undefined;
+  }
+
+  getPendingMemoryEpisodes(limit = 12) {
+    if (
+      this.data.profile.memoryEnabled !== true ||
+      this.data.relationship.memoryEnabled !== true
+    ) {
+      return [];
+    }
+    return this.data.conversationEpisodes
+      .filter((episode) => !episode.refinedAt)
+      .slice(-Math.max(1, Math.min(20, limit)))
+      .map(clone);
+  }
+
+  applyMemoryRefinement(candidates, episodeIds) {
+    const allowedCategories = new Set([
+      "preferred_name",
+      "explicit_preference",
+      "shared_experience",
+      "interaction_habit",
+    ]);
+    return this.#commit((data) => {
+      if (
+        data.profile.memoryEnabled !== true ||
+        data.relationship.memoryEnabled !== true
+      ) {
+        return;
+      }
+      const refinedAt = data.demoNow;
+      const validEpisodeIds = new Set(
+        Array.isArray(episodeIds) ? episodeIds.filter((id) => typeof id === "string") : [],
+      );
+      for (const episode of data.conversationEpisodes) {
+        if (validEpisodeIds.has(episode.id)) episode.refinedAt = refinedAt;
+      }
+      for (const raw of Array.isArray(candidates) ? candidates.slice(0, 5) : []) {
+        const summary = asShortString(raw?.summary, "", 120);
+        const category = allowedCategories.has(raw?.category)
+          ? raw.category
+          : undefined;
+        const confidence =
+          typeof raw?.confidence === "number"
+            ? Math.max(0, Math.min(1, raw.confidence))
+            : 0;
+        if (!summary || !category || confidence < 0.75) continue;
+        if (containsSensitiveMemory(summary)) continue;
+        const duplicate = data.memories.some(
+          (memory) =>
+            memory.status !== "deleted" &&
+            memory.category === category &&
+            memory.summary === summary,
+        );
+        if (duplicate) continue;
+        const memoryId = `memory-auto-${randomUUID()}`;
+        if (category === "preferred_name") {
+          for (const previous of data.memories) {
+            if (
+              previous.category === "preferred_name" &&
+              previous.status === "confirmed" &&
+              !previous.supersededBy
+            ) {
+              previous.supersededBy = memoryId;
+            }
+          }
+        }
+        data.memories.unshift({
+          id: memoryId,
+          playerId: data.profile.id,
+          characterId: data.skill.characterId,
+          type: category === "shared_experience" ? "choice" : "milestone",
+          category,
+          title: asShortString(raw?.title, "自然形成的长期记忆", 80),
+          summary,
+          characterText: summary,
+          createdAt: refinedAt,
+          status: "confirmed",
+          userConfirmed: true,
+          reusableByCharacter: true,
+          campaignReusable: true,
+          sourceType: "chat",
+          sourceId: [...validEpisodeIds].join(",").slice(0, 120),
+          tags: asStringArray(raw?.tags, [], 12),
+          memoryVersion: 1,
+          rationale: "由本地对话分层记忆系统从明确表达中提炼。",
+          origin: "automatic",
+          hidden: true,
+          confidence,
+        });
+      }
+    });
   }
 
   proposeChatMemoryCandidate(text, sourceId) {
@@ -2911,6 +3192,7 @@ class CompanionStore {
     const taskId = text(input.taskId ?? input.plan?.id, 120);
     const regionId = text(input.regionId ?? input.region?.id, 80);
     const rolloutPercent = Number(input.rolloutPercent);
+    const exampleMode = input.exampleMode === true;
     if (!sourceId || !taskId || !regionId) {
       throw new Error("区域发行方案缺少来源、任务或区域标识。");
     }
@@ -2966,6 +3248,8 @@ class CompanionStore {
           regionId,
           rolloutPercent,
           rolloutSelected,
+          exampleMode,
+          exampleFrequencyBypass: exampleMode,
           contentType: "version_launch",
           templateId: `regional-plan-${sourceId}`.slice(0, 160),
           ...(rolloutSelected ? { releasePlan: plan } : {}),
@@ -2998,7 +3282,7 @@ class CompanionStore {
         actor: "system",
         entityType: "event",
         entityId: eventId,
-        metadata: { sourceId, taskId, regionId, rolloutPercent },
+        metadata: { sourceId, taskId, regionId, rolloutPercent, exampleMode },
       });
 
       const contactDecision = evaluateContactPolicy({
@@ -3039,13 +3323,18 @@ class CompanionStore {
               item.campaignReusable === true,
           )
         : null;
-      const topic = plan.theme || plan.title;
+      const topic = sanitizePlayerVisibleText(
+        plan.theme || plan.title,
+        "列车上的新故事",
+      );
       const memoryLead = memory
-        ? `还记得“${memory.title}”吗？说到这个，`
+        ? `还记得“${sanitizePlayerVisibleText(memory.title, "以前聊过的那件事")}”吗？`
         : "";
-      const body =
-        `${memoryLead}咱刚看到一段和“${topic}”有关的新旅程。` +
-        "不用急着现在就去，等你哪天正好想换个心情，咱再一起看看，好不好？";
+      const body = sanitizePlayerVisibleText(
+        `${memoryLead}最近列车上多了件和“${topic}”有关的新鲜事。` +
+          "你有空、也正好想换换心情的时候，可以来看看；最近忙的话就先放着。",
+        PLAYER_VISIBLE_MESSAGE_FALLBACK,
+      );
       const messageId = `message-${randomUUID()}`;
       data.messages.unshift({
         id: messageId,
@@ -3061,7 +3350,9 @@ class CompanionStore {
           reviewer: "区域发行控制台",
           decision: "approved",
           reviewedAt: data.demoNow,
-          note: "区域方案发布后由共生式角色按关系护栏自然执行。",
+          note: exampleMode
+            ? "示例发布：仅绕过主动触达频控，其余关系与安全护栏保持有效。"
+            : "区域方案发布后由共生式角色按关系护栏自然执行。",
         },
         trace: {
           skillVersion: data.skill.skillVersion,
@@ -3069,6 +3360,7 @@ class CompanionStore {
           ruleIds: [
             "release.regional_plan_received",
             "release.gray_rollout_selected",
+            ...(exampleMode ? ["release.example_frequency_bypass"] : []),
             "memory.authorized_reference",
             "relationship.soft_version_invitation",
             "safety.contact_policy_before_generation",
@@ -3111,9 +3403,17 @@ class CompanionStore {
   }
 
   deliverReleaseTestMessage(input) {
-    const title = asShortString(input?.title, "发行测试消息", 120);
-    const body = asShortString(input?.body, "", 1200);
-    if (!body) throw new Error("测试消息内容不能为空。");
+    const rawTitle = asShortString(input?.title, "三月七想和你聊聊", 120);
+    const rawBody = asShortString(input?.body, "", 1200);
+    if (!rawBody) throw new Error("测试消息内容不能为空。");
+    const title = sanitizePlayerVisibleText(
+      rawTitle,
+      PLAYER_VISIBLE_TITLE_FALLBACK,
+    );
+    const body = sanitizePlayerVisibleText(
+      rawBody,
+      PLAYER_VISIBLE_MESSAGE_FALLBACK,
+    );
     return this.#commit((data, now) => {
       const eventId = `event-${randomUUID()}`;
       const messageId = `message-${randomUUID()}`;

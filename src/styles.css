@@ -368,6 +368,9 @@ a:focus-visible {
   background: transparent;
   cursor: grab;
   filter: drop-shadow(0 16px 16px rgb(55 40 79 / 18%));
+  transform-origin: 50% 88%;
+  animation: pet-idle-float 3.6s ease-in-out infinite;
+  will-change: transform;
 }
 
 .character-button:active {
@@ -4212,6 +4215,17 @@ a:focus-visible {
   background: #ffebf0;
 }
 
+@keyframes pet-idle-float {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0);
+  }
+
+  50% {
+    transform: translate3d(0, -6px, 0) rotate(0.25deg);
+  }
+}
+
 @keyframes speaking-pulse {
   from {
     filter: drop-shadow(0 0 0 rgb(235 113 166 / 0%));
@@ -4482,6 +4496,26 @@ a:focus-visible {
   display: flex;
   flex-direction: column;
   padding: 14px 16px;
+}
+
+.main-content .chat-panel.embedded .message-list {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 6px 14px;
+  overscroll-behavior: contain;
+}
+
+.main-content .chat-panel.embedded .chat-form {
+  flex: 0 0 auto;
+  margin-top: 10px;
+}
+
+.main-content .chat-panel.embedded .local-note {
+  flex: 0 0 auto;
+  min-height: 14px;
+  margin: 8px 2px 0;
 }
 
 .main-content .chat-panel-header {

@@ -14,13 +14,18 @@ contextBridge.exposeInMainWorld("marchDesktop", {
   endWindowMove: () => ipcRenderer.invoke("window:end-move"),
   getDesktopStatus: () =>
     ipcRenderer.invoke("window:get-desktop-status"),
-  setClickThrough: (enabled) =>
-    ipcRenderer.invoke("window:set-click-through", enabled),
   setSnapEnabled: (enabled) =>
     ipcRenderer.invoke("window:set-snap-enabled", enabled),
+  setMode: (mode) => ipcRenderer.invoke("window:set-mode", mode),
+  setPetScale: (scale) =>
+    ipcRenderer.invoke("window:set-pet-scale", scale),
+  setPetDefaultScale: (scale) =>
+    ipcRenderer.invoke("window:set-pet-default-scale", scale),
   show: (route) => ipcRenderer.invoke("window:show", route),
   showContextMenu: () =>
     ipcRenderer.send("window:show-context-menu"),
+  reportRendererHeartbeat: () =>
+    ipcRenderer.send("window:renderer-heartbeat"),
   onNavigate: (callback) => {
     if (desktopNavigateListener) {
       ipcRenderer.removeListener(
@@ -82,6 +87,8 @@ contextBridge.exposeInMainWorld("marchDesktop", {
       }),
     setMemoryEnabled: (enabled) =>
       ipcRenderer.invoke("companion:set-memory-enabled", enabled),
+    recordConversationTurn: (input) =>
+      ipcRenderer.invoke("companion:record-conversation-turn", input),
     proposeMemoryCandidate: (text, sourceId) =>
       ipcRenderer.invoke("companion:propose-memory-candidate", {
         text,

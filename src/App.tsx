@@ -29,7 +29,6 @@ import {
 } from "@phosphor-icons/react";
 import type {
   AiConversationMessage,
-  MemoryCandidateSummary,
   TtsPublicSettings,
   TtsStreamEvent,
 } from "./ai/types";
@@ -85,6 +84,9 @@ interface Message {
 
 type ReplySource = "local" | "model" | "error";
 type VoiceState = "idle" | "synthesizing" | "speaking" | "error";
+
+const CHAT_HISTORY_TURN_LIMIT = 10;
+const CHAT_HISTORY_MESSAGE_LIMIT = CHAT_HISTORY_TURN_LIMIT * 2;
 
 const PET_DEFAULT_SCALE = petWindowConfig.defaultScale;
 const PET_MIN_SCALE =
@@ -194,7 +196,7 @@ function inferMood(text: string): MarchMood {
 }
 
 function toAiMessages(messages: Message[]): AiConversationMessage[] {
-  return messages.slice(-10).map((message) => ({
+  return messages.slice(-CHAT_HISTORY_MESSAGE_LIMIT).map((message) => ({
     role: message.role === "you" ? "user" : "assistant",
     content: message.text,
   }));
@@ -215,9 +217,6 @@ function App() {
   const [input, setInput] = useState("");
   const [pinned, setPinned] = useState(true);
   const [modelReady, setModelReady] = useState(false);
-  const [memoryCandidate, setMemoryCandidate] =
-    useState<MemoryCandidateSummary | null>(null);
-  const [memoryDecisionBusy, setMemoryDecisionBusy] = useState(false);
   const [ttsSettings, setTtsSettings] =
     useState<TtsPublicSettings | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
@@ -368,6 +367,18 @@ function App() {
       60_000,
     );
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const reportHealth = () =>
+      window.marchDesktop?.reportRendererHeartbeat();
+    reportHealth();
+    const timer = window.setInterval(reportHealth, 5_000);
+    document.addEventListener("visibilitychange", reportHealth);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", reportHealth);
+    };
   }, []);
 
   useEffect(() => {
@@ -708,16 +719,18 @@ function App() {
       releaseMessage.id,
     );
     const messageId = nextMessageId.current++;
-    setMessages((current) => [
-      ...current,
-      {
-        id: messageId,
-        role: "march",
-        text: releaseMessage.body,
-        speechText: releaseMessage.body,
-        mood: "soft",
-      },
-    ]);
+    setMessages((current) =>
+      [
+        ...current,
+        {
+          id: messageId,
+          role: "march" as const,
+          text: releaseMessage.body,
+          speechText: releaseMessage.body,
+          mood: "soft" as const,
+        },
+      ].slice(-CHAT_HISTORY_MESSAGE_LIMIT),
+    );
     setBubbleChatOpen(true);
     speak(releaseMessage.body, "soft");
   }, [companionData]);
@@ -911,7 +924,9 @@ function App() {
       text: cleanInput,
     };
     registerPlayerInteraction();
-    const nextConversation = [...messages, userMessage].slice(-10);
+    const nextConversation = [...messages, userMessage].slice(
+      -CHAT_HISTORY_MESSAGE_LIMIT,
+    );
 
     setMessages(nextConversation);
     setInput("");
@@ -922,7 +937,6 @@ function App() {
     let replyText = "";
     let replyMood: MarchMood = "bright";
     let source: ReplySource = "local";
-    let nextMemoryCandidate: MemoryCandidateSummary | undefined;
 
     if (window.marchDesktop?.ai && modelReady) {
       try {
@@ -936,7 +950,6 @@ function App() {
             result.model === "local-safety-guard"
               ? "local"
               : "model";
-          nextMemoryCandidate = result.memoryCandidate;
         } else {
           const fallback = getMarchReply(cleanInput);
           replyText = fallback.text;
@@ -955,26 +968,6 @@ function App() {
       replyMood = fallback.mood;
     }
 
-    if (!nextMemoryCandidate) {
-      const proposed =
-        await window.marchDesktop?.companion
-          ?.proposeMemoryCandidate(
-            cleanInput,
-            `chat-message-${userMessage.id}`,
-          )
-          .catch(() => undefined);
-      if (proposed) {
-        nextMemoryCandidate = {
-          id: proposed.id,
-          title: proposed.title,
-          summary: proposed.summary,
-          characterText: proposed.characterText,
-          category: proposed.category,
-        };
-      }
-    }
-    setMemoryCandidate(nextMemoryCandidate ?? null);
-
     const marchMessage: Message = {
       id: nextMessageId.current++,
       role: "march",
@@ -982,30 +975,24 @@ function App() {
       speechText: replyText,
       mood: replyMood,
     };
-    setMessages((current) => [...current, marchMessage].slice(-10));
+    const savedData = await window.marchDesktop?.companion
+      ?.recordConversationTurn({
+        conversationId: "desktop-chat",
+        turnId: `chat-message-${userMessage.id}`,
+        userText: cleanInput,
+        assistantText: replyText,
+        replySource: source,
+      })
+      .catch(() => undefined);
+    if (savedData) setCompanionData(savedData);
+
+    setMessages((current) =>
+      [...current, marchMessage].slice(-CHAT_HISTORY_MESSAGE_LIMIT),
+    );
     setReplySource(source);
     void playSpeech(replyText, replyMood);
     await revealReply(marchMessage.id, replyText, replyMood);
     setSending(false);
-  };
-
-  const resolveMemoryCandidate = async (confirmed: boolean) => {
-    const api = window.marchDesktop?.companion;
-    if (!api || !memoryCandidate || memoryDecisionBusy) return;
-    setMemoryDecisionBusy(true);
-    try {
-      const nextData = await api.resolveMemoryCandidate(
-        memoryCandidate.id,
-        confirmed,
-      );
-      setCompanionData(nextData);
-      if (confirmed) {
-        speak("好，咱记住啦。你随时都可以在相册里改主意。", "soft");
-      }
-      setMemoryCandidate(null);
-    } finally {
-      setMemoryDecisionBusy(false);
-    }
   };
 
   const togglePin = async () => {
@@ -1171,23 +1158,19 @@ function App() {
         voiceState === "speaking" ? "is-speaking" : ""
       }`}
     >
-      <motion.button
+      <button
         className="character-button"
         type="button"
         aria-label="和三月七打招呼"
         title="单击互动，也可以拖动窗口"
         onClick={surpriseMe}
-        animate={{ y: [0, -7, 0], rotate: [0, 0.35, 0] }}
-        transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
-        whileHover={{ scale: 1.025 }}
-        whileTap={{ scale: 0.985 }}
       >
         <img
           src="./assets/march7th-pet.png"
           alt="手持相机、挥手打招呼的三月七 Q 版桌宠"
           draggable={false}
         />
-      </motion.button>
+      </button>
     </section>
   );
 
@@ -1341,23 +1324,7 @@ function App() {
                   )}
                 </button>
               </form>
-            )}
-            {bubbleChatOpen && memoryCandidate && (
-              <aside className="memory-candidate-card compact" aria-live="polite">
-                <div>
-                  <strong>{memoryCandidate.title}</strong>
-                  <p>{memoryCandidate.summary}</p>
-                </div>
-                <div>
-                  <button type="button" disabled={memoryDecisionBusy} onClick={() => void resolveMemoryCandidate(false)}>
-                    不保存
-                  </button>
-                  <button type="button" className="confirm" disabled={memoryDecisionBusy} onClick={() => void resolveMemoryCandidate(true)}>
-                    让咱记住
-                  </button>
-                </div>
-              </aside>
-            )}          </motion.div>
+            )}</motion.div>
         </section>
       )}
 
@@ -1392,7 +1359,7 @@ function App() {
                 <span>{modelReady ? "DeepSeek 对话" : "本地对话"}</span>
               </header>
               <div ref={messageListRef} className="message-list">
-                {messages.slice(-5).map((message) =>
+                {messages.slice(-CHAT_HISTORY_MESSAGE_LIMIT).map((message) =>
                   message.role === "march" ? (
                     <div
                       key={message.id}
@@ -1438,32 +1405,7 @@ function App() {
                   ),
                 )}
               </div>
-              {memoryCandidate && (
-                <aside className="memory-candidate-card" aria-live="polite">
-                  <div>
-                    <strong>{memoryCandidate.title}</strong>
-                    <p>{memoryCandidate.summary}</p>
-                    <small>确认前不会进入长期记忆，也不会用于发行内容。</small>
-                  </div>
-                  <div>
-                    <button
-                      type="button"
-                      disabled={memoryDecisionBusy}
-                      onClick={() => void resolveMemoryCandidate(false)}
-                    >
-                      不保存
-                    </button>
-                    <button
-                      type="button"
-                      className="confirm"
-                      disabled={memoryDecisionBusy}
-                      onClick={() => void resolveMemoryCandidate(true)}
-                    >
-                      让咱记住
-                    </button>
-                  </div>
-                </aside>
-              )}              <form className="chat-form" onSubmit={submitMessage}>
+              <form className="chat-form" onSubmit={submitMessage}>
                 <input
                   ref={inputRef}
                   value={input}

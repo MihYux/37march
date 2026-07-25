@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("releaseOperator", {
     ipcRenderer.invoke("release:publish-to-agents", { regionId, directiveId, experimentId }),
   publishPlanToAgents: (regionId, taskId, rolloutPercent) =>
     ipcRenderer.invoke("release:publish-plan-to-agents", { regionId, taskId, rolloutPercent }),
+  publishExamplePlan: (regionId, taskId) =>
+    ipcRenderer.invoke("release:publish-example-plan", { regionId, taskId }),
   importMetrics: (regionId, experimentId, text) =>
     ipcRenderer.invoke("release:import-metrics", { regionId, experimentId, text }),
   importMetricsFile: (regionId, experimentId) =>
