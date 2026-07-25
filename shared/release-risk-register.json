@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-07-24",
+  "releaseStatus": "blocked",
+  "items": [
+    {
+      "id": "character-visual-rights",
+      "area": "license",
+      "severity": "high",
+      "status": "blocked",
+      "owner": "project-owner",
+      "gate": "公开或商业分发前取得并归档当前 PNG 的明确使用与再分发依据"
+    },
+    {
+      "id": "voice-clone-rights",
+      "area": "license",
+      "severity": "high",
+      "status": "runtime-gated",
+      "owner": "project-owner",
+      "gate": "启用前由用户确认声音样本和复刻音色授权；正式分发前在仓库外归档证据和下架流程"
+    },
+    {
+      "id": "upstream-skill-license",
+      "area": "license",
+      "severity": "medium",
+      "status": "ready",
+      "owner": "engineering",
+      "evidence": "MIT license and upstream revision 87c6d0db78fa9d9f2d3dd590337604e60f807d66"
+    },
+    {
+      "id": "restricted-assets-and-secrets",
+      "area": "security",
+      "severity": "high",
+      "status": "ready",
+      "owner": "engineering",
+      "evidence": "npm run audit:release"
+    },
+    {
+      "id": "macos-signing-notarization",
+      "area": "distribution",
+      "severity": "high",
+      "status": "blocked",
+      "owner": "release",
+      "gate": "配置 Developer ID、签名、公证和安装验证"
+    },
+    {
+      "id": "windows-linux-validation",
+      "area": "platform",
+      "severity": "medium",
+      "status": "blocked",
+      "owner": "qa",
+      "gate": "在对应系统完成原生构建、托盘、透明窗口、安全存储和卸载验证"
+    },
+    {
+      "id": "automatic-update-and-rollback",
+      "area": "operations",
+      "severity": "medium",
+      "status": "blocked",
+      "owner": "release",
+      "gate": "选择更新通道、签名发布源并验证回滚；MVP 源码分发不启用自动更新"
+    },
+    {
+      "id": "third-party-cost-and-outage",
+      "area": "operations",
+      "severity": "medium",
+      "status": "ready",
+      "owner": "engineering",
+      "evidence": "每日请求/字符预算、连续失败熔断、超时、取消和离线回退"
+    },
+    {
+      "id": "privacy-controls",
+      "area": "privacy",
+      "severity": "high",
+      "status": "ready",
+      "owner": "engineering",
+      "evidence": "首次披露、数据导出、记忆控制、退出、删除、Key 隔离和 privacy-manifest.json"
+    }
+  ]
+}

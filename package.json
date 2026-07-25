@@ -1,0 +1,89 @@
+{
+  "name": "desktop-march-7th",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A lightweight March 7th desktop companion prototype.",
+  "author": "MihYux",
+  "homepage": "https://github.com/MihYux/desktop-march-7th",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MihYux/desktop-march-7th.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MihYux/desktop-march-7th/issues"
+  },
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.cjs",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "dev:electron": "wait-on tcp:127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build": "tsc -b && vite build",
+    "start": "npm run build && electron .",
+    "operator": "npm run build && cross-env MARCH7TH_SURFACE=operator electron .",
+    "all": "npm run build && cross-env MARCH7TH_SURFACE=all electron .",
+    "test": "vitest run && node --test electron/ai-client.test.cjs electron/ai-settings.test.cjs electron/campaign-review.test.cjs electron/companion-store.test.cjs electron/contact-policy.test.cjs electron/content-safety.test.cjs electron/demo-scenarios.test.cjs electron/ipc-contract.test.cjs electron/prd-acceptance.test.cjs electron/release-system.test.cjs electron/release-skill-loader.test.cjs electron/layered-memory.test.cjs electron/release-constraints.test.cjs electron/release-workspace-store.test.cjs electron/release-workflow.test.cjs electron/plan-publish-workflow.test.cjs electron/plan-publish-draft.test.cjs electron/regional-plan-delivery.test.cjs electron/service-budget.test.cjs electron/tts-client.test.cjs electron/tts-settings.test.cjs electron/window-state.test.cjs",
+    "check": "npm run test && npm run build && npm run audit:acceptance && npm run audit:release",
+    "audit:acceptance": "node scripts/acceptance-audit.cjs",
+    "audit:release": "node scripts/release-audit.cjs",
+    "audit:release:strict": "node scripts/release-audit.cjs --strict-release",
+    "package": "npm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "mammoth": "^1.12.0",
+    "motion": "^12.42.2",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "9.2.4",
+    "cross-env": "^10.1.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10",
+    "wait-on": "^9.0.1"
+  },
+  "build": {
+    "appId": "com.rehoyo.march7th",
+    "productName": "March 7th Desktop",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "shared/**/*",
+      "docs/PRIVACY.md",
+      "docs/SECURITY.md",
+      "docs/ASSET_AND_LICENSE_REGISTER.md",
+      "docs/PLATFORM_MATRIX.md",
+      "docs/ACCEPTANCE_MATRIX.md",
+      "docs/DEMO_GUIDE.md",
+      "docs/RELEASE_CHECKLIST.md",
+      "docs/TROUBLESHOOTING.md",
+      "CHANGELOG.md",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.entertainment"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  }
+}
