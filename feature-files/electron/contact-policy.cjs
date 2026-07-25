@@ -132,6 +132,9 @@ function evaluateContactPolicy({ data, event, now }) {
     "version_sustain",
     "recall",
   ]);
+  const bypassFrequencyLimits =
+    versionTypes.has(contentType) &&
+    event?.payload?.exampleFrequencyBypass === true;
   const playerContext = event?.payload?.playerContext;
   if (
     versionTypes.has(contentType) &&
@@ -221,7 +224,7 @@ function evaluateContactPolicy({ data, event, now }) {
     data.messages,
     weekThreshold,
   );
-  if (weeklyMessages.length >= data.profile.weeklyContactLimit) {
+  if (!bypassFrequencyLimits && weeklyMessages.length >= data.profile.weeklyContactLimit) {
     return suppress(
       CONTACT_SUPPRESSION.WEEKLY_LIMIT,
       contentType,
@@ -245,6 +248,7 @@ function evaluateContactPolicy({ data, event, now }) {
         Date.parse(right.sentAt) - Date.parse(left.sentAt),
     )[0];
   if (
+    !bypassFrequencyLimits &&
     latestProactive &&
     Date.parse(latestProactive.sentAt) > minimumIntervalThreshold
   ) {
@@ -257,6 +261,7 @@ function evaluateContactPolicy({ data, event, now }) {
   }
 
   if (
+    !bypassFrequencyLimits &&
     versionTypes.has(contentType) &&
     weeklyMessages.some((message) => versionTypes.has(message.type))
   ) {
@@ -268,7 +273,7 @@ function evaluateContactPolicy({ data, event, now }) {
     );
   }
 
-  if (data.profile.reducedContentTypes.includes(contentType)) {
+  if (!bypassFrequencyLimits && data.profile.reducedContentTypes.includes(contentType)) {
     const reducedThreshold = Date.parse(evaluatedAt) - 14 * 24 * 60 * 60 * 1_000;
     const recentlySentSameType = data.messages.some(
       (message) =>
@@ -287,7 +292,7 @@ function evaluateContactPolicy({ data, event, now }) {
   }
 
   const templateId = event?.payload?.templateId;
-  if (typeof templateId === "string" && templateId) {
+  if (!bypassFrequencyLimits && typeof templateId === "string" && templateId) {
     const duplicateThreshold =
       Date.parse(evaluatedAt) - 7 * 24 * 60 * 60 * 1_000;
     const repeatedTemplate = data.messages.some(
@@ -317,6 +322,9 @@ function evaluateContactPolicy({ data, event, now }) {
     details: {
       weeklyUsed: weeklyMessages.length,
       weeklyLimit: data.profile.weeklyContactLimit,
+      ...(bypassFrequencyLimits
+        ? { exampleFrequencyBypass: true }
+        : {}),
     },
   };
 }

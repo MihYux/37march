@@ -238,7 +238,7 @@ test("Windows startup disables the high-load transparent GPU compositor", () => 
   );
 });
 
-test("operator preload is narrow and campaign mutation is absent from player preload", () => {
+test("release workspace preload is narrow and mutation is absent from player preload", () => {
   const operatorPreload = fs.readFileSync(
     path.join(__dirname, "operator-preload.cjs"),
     "utf8",
@@ -250,5 +250,7 @@ test("operator preload is narrow and campaign mutation is absent from player pre
   assert.equal(/\brequire\(["']node:(?:fs|child_process)["']\)/.test(operatorPreload), false);
   assert.equal(/getApiKey|readApiKey|rawKey|\bshell\b/.test(operatorPreload), false);
   assert.equal(/companion:create-campaign/.test(playerPreload), false);
-  assert.match(operatorPreload, /operator:publish-bundle/);
+  assert.match(operatorPreload, /release:export-bundle/);
+  assert.match(operatorPreload, /release:deliver-test/);
+  assert.equal(/release:save-task/.test(playerPreload), false);
 });

@@ -28,6 +28,8 @@ const {
   reviewCharacterOutput,
 } = require("./content-safety.cjs");
 const { CompanionStore } = require("./companion-store.cjs");
+const { ReleaseSkillLoader } = require("./release-skill-loader.cjs");
+const { ReleaseWorkspaceStore } = require("./release-workspace-store.cjs");
 const {
   ServiceBudgetStore,
 } = require("./service-budget.cjs");
@@ -37,8 +39,14 @@ const {
 } = require("./tts-client.cjs");
 const { TtsSettingsStore } = require("./tts-settings.cjs");
 const {
+  PET_DEFAULT_SCALE,
+  PET_DEFAULT_SIZE,
+  PET_MIN_SIZE,
   WindowStateStore,
   constrainAndSnapBounds,
+  getPetMaxScaleForWorkArea,
+  getPetSize,
+  normalizePetScale,
 } = require("./window-state.cjs");
 
 let petWindow;
@@ -53,15 +61,30 @@ let isPinned = true;
 let isQuitting = false;
 let windowStateStore;
 let windowStateWriteTimer;
+let petRendererHeartbeatAt = Date.now();
+let petRendererHeartbeatSeen = false;
+let petRendererWatchdog;
 
-// 桌宠固定尺寸。Windows 上对 transparent+frameless 窗口，任何几何调用
-// （setPosition / setBounds 都一样）都会让 DWM 重新施加 1px 不可见边框，
-// 导致 width 每次 +1。解法：所有几何操作都重新断言这个固定尺寸，涨的那 1px
-// 会被下次调用立刻纠正，不再累积。绝不回读 getBounds() 的 width/height。
-const PET_WIDTH = 430;
-const PET_HEIGHT = 660;
+// 桌宠窗口有两种模式：PET（默认 376×620，只露桌宠）与 PANEL（齿轮展开后的大面板）。
+// Windows 上对 transparent+frameless 窗口，任何几何调用（setPosition/setBounds）
+// 都会让 DWM 重新施加 1px 不可见边框，width 每次 +1。解法：所有几何操作都重新
+// 断言"当前模式"的尺寸，涨的那 1px 会被下次调用立刻纠正，不累积。绝不回读
+// getBounds() 的 width/height。
+const PANEL_SIZE = { width: 920, height: 640 };
+let windowMode = "pet";
+let petScale = PET_DEFAULT_SCALE;
+let petDefaultScale = PET_DEFAULT_SCALE;
+function currentSize() {
+  return windowMode === "panel" ? PANEL_SIZE : getPetSize(petScale);
+}
+let releaseWorkspaceStore;
+let releaseSkillLoader;
+let memoryRefinementTimer;
+let memoryRefinementRunning = false;
 let aiSettingsStore;
 let companionStore;
+let companionDataPath;
+let companionDataWatchStarted = false;
 let serviceBudgetStore;
 let ttsSettingsStore;
 const activeTtsStreams = new Map();
@@ -90,14 +113,29 @@ function getWorkAreas() {
   return screen.getAllDisplays().map((display) => display.workArea);
 }
 
+function getPetMaxScale(bounds) {
+  const display = bounds
+    ? screen.getDisplayMatching(bounds)
+    : screen.getPrimaryDisplay();
+  return getPetMaxScaleForWorkArea(display.workArea);
+}
+
+function fitPetScaleToDisplay(scale, bounds) {
+  return Math.min(
+    normalizePetScale(scale),
+    getPetMaxScale(bounds),
+  );
+}
+
 function getDesktopStatus() {
   const stored = windowStateStore?.getSnapshot() ?? {
     bounds: petWindow?.getBounds() ?? {
       x: 20,
       y: 20,
-      width: 430,
-      height: 660,
+      ...PET_DEFAULT_SIZE,
     },
+    petScale,
+    petDefaultScale,
     pinned: isPinned,
     clickThrough: false,
     snapEnabled: true,
@@ -105,6 +143,9 @@ function getDesktopStatus() {
   return {
     ...stored,
     bounds: petWindow?.getBounds() ?? stored.bounds,
+    petMaxScale: getPetMaxScale(
+      petWindow?.getBounds() ?? stored.bounds,
+    ),
     pinned: isPinned,
     trayAvailable: Boolean(tray),
   };
@@ -114,6 +155,44 @@ function notifyCompanionDataChanged(data) {
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.webContents.send("companion:data-updated", data);
   }
+}
+
+function latestRegionalReleaseMessage(data) {
+  return data?.messages?.find(
+    (message) =>
+      message.sentAt &&
+      message.trace?.ruleIds?.includes("release.regional_plan_received"),
+  );
+}
+
+function startCompanionDataWatcher() {
+  if (
+    companionDataWatchStarted ||
+    !companionDataPath ||
+    isOperatorMode
+  ) {
+    return;
+  }
+  companionDataWatchStarted = true;
+  fs.watchFile(
+    companionDataPath,
+    { interval: 450, persistent: false },
+    (current, previous) => {
+      if (current.mtimeMs <= previous.mtimeMs || !companionStore) return;
+      try {
+        const before = companionStore.getSnapshot();
+        const previousReleaseId = latestRegionalReleaseMessage(before)?.id;
+        const next = companionStore.reloadFromDisk();
+        notifyCompanionDataChanged(next);
+        const nextRelease = latestRegionalReleaseMessage(next);
+        if (nextRelease && nextRelease.id !== previousReleaseId) {
+          showPetWindow();
+        }
+      } catch {
+        // Atomic writes may briefly replace the path; the next watch tick retries.
+      }
+    },
+  );
 }
 
 function cancelActiveTtsStreams() {
@@ -129,6 +208,8 @@ function persistWindowState() {
   }
   windowStateStore.update({
     bounds: petWindow.getBounds(),
+    petScale,
+    petDefaultScale,
     pinned: isPinned,
   });
 }
@@ -136,32 +217,6 @@ function persistWindowState() {
 function scheduleWindowStateWrite() {
   clearTimeout(windowStateWriteTimer);
   windowStateWriteTimer = setTimeout(persistWindowState, 220);
-}
-
-function setClickThrough(enabled) {
-  const nextEnabled = enabled === true;
-  if (nextEnabled && !tray) {
-    return {
-      ...getDesktopStatus(),
-      ok: false,
-      error: "系统托盘不可用，无法保证恢复交互，已拒绝开启点击穿透。",
-    };
-  }
-  if (petWindow && !petWindow.isDestroyed()) {
-    petWindow.setIgnoreMouseEvents(nextEnabled, {
-      forward: true,
-    });
-  }
-  windowStateStore?.update({
-    clickThrough: nextEnabled,
-    bounds: petWindow?.getBounds(),
-    pinned: isPinned,
-  });
-  rebuildTrayMenu();
-  return {
-    ...getDesktopStatus(),
-    ok: true,
-  };
 }
 
 function sendDesktopRoute(route) {
@@ -179,7 +234,6 @@ function showPetWindow(route) {
   if (!petWindow || petWindow.isDestroyed()) {
     createPetWindow();
   }
-  setClickThrough(false);
   if (petWindow?.isMinimized()) {
     petWindow.restore();
   }
@@ -227,11 +281,6 @@ function buildDesktopMenu() {
       click: () => showPetWindow(),
     },
     {
-      label: status.clickThrough ? "恢复窗口交互" : "开启点击穿透",
-      enabled: status.clickThrough || status.trayAvailable,
-      click: () => setClickThrough(!status.clickThrough),
-    },
-    {
       label: "边缘吸附",
       type: "checkbox",
       checked: status.snapEnabled,
@@ -277,7 +326,6 @@ function buildDesktopMenu() {
       label: "退出三月七桌宠",
       click: () => {
         isQuitting = true;
-        setClickThrough(false);
         persistWindowState();
         app.quit();
       },
@@ -319,15 +367,16 @@ function createTray() {
 function keepPetWindowOnScreen() {
   if (!petWindow || petWindow.isDestroyed()) return;
   const status = getDesktopStatus();
-  // 用固定尺寸计算夹紧位置，并重新断言固定尺寸（见 PET_WIDTH 注释）。
+  // 用当前模式尺寸计算夹紧位置并重新断言（见 currentSize 注释）。
+  const size = currentSize();
   const current = petWindow.getBounds();
   const nextBounds = constrainAndSnapBounds(
-    { x: current.x, y: current.y, width: PET_WIDTH, height: PET_HEIGHT },
+    { x: current.x, y: current.y, width: size.width, height: size.height },
     getWorkAreas(),
     { snap: status.snapEnabled },
   );
   petWindow.setBounds(
-    { x: nextBounds.x, y: nextBounds.y, width: PET_WIDTH, height: PET_HEIGHT },
+    { x: nextBounds.x, y: nextBounds.y, width: size.width, height: size.height },
     false,
   );
   persistWindowState();
@@ -335,7 +384,7 @@ function keepPetWindowOnScreen() {
 
 function messageCharacterCount(messages) {
   if (!Array.isArray(messages)) return 0;
-  return messages.slice(-12).reduce(
+  return messages.slice(-20).reduce(
     (total, message) =>
       total +
       (typeof message?.content === "string"
@@ -390,7 +439,7 @@ function registerAiHandlers() {
       if (!settings.hasApiKey) {
         return {
           ok: false,
-          error: "请先在模型设置中填写 DeepSeek API Key。",
+          error: "请先在设置中填写 DeepSeek API Key。",
           code: "API_KEY_MISSING",
         };
       }
@@ -446,7 +495,7 @@ function registerAiHandlers() {
       if (!settings.hasApiKey) {
         return {
           ok: false,
-          error: "请先在模型设置中填写 DeepSeek API Key。",
+          error: "请先在设置中填写 DeepSeek API Key。",
           code: "API_KEY_MISSING",
         };
       }
@@ -458,47 +507,50 @@ function registerAiHandlers() {
             .reverse()
             .find((message) => message?.role === "user")
         : undefined;
-      const authorizedMemories =
-        companionStore.getAuthorizedChatMemories(
-          latestUserMessage?.content ?? "",
-          3,
-        );
-      const memoryContext = authorizedMemories.length
-        ? `\n\n【玩家已确认且允许引用的记忆】\n${authorizedMemories
-            .map(
-              (memory) =>
-                `- [${memory.id}] ${memory.title}：${memory.summary}`,
-            )
-            .join("\n")}\n只能在当前话题自然相关时引用；不得声称知道其他信息。`
+      const relevantMemory = companionStore.getRelevantMemoryContext(
+        latestUserMessage?.content ?? "",
+        { durableLimit: 5, episodeLimit: 3 },
+      );
+      const memoryLines = [
+        ...relevantMemory.durable.map(
+          (memory) => `- 长期记忆：${memory.summary}`,
+        ),
+        ...relevantMemory.episodes.map(
+          (episode) => `- 近期对话：${episode.userSummary}`,
+        ),
+      ];
+      const memoryContext = memoryLines.length
+        ? `\n\n【仅供自然关联时使用的玩家记忆】\n${memoryLines.join("\n")}\n这些内容不是本轮必须提及的素材。只有与玩家当前意图直接相关时才可简短引用；禁止暴露记忆系统、推断未提供信息或为了发行强行套用记忆。`
+        : "";
+      const activeRelease =
+        companionStore.getActiveReleasePlanContext();
+      const releaseContext = activeRelease
+        ? `\n\n【当前已接收的区域发行方案】\n` +
+          `方案：${activeRelease.plan.title}\n` +
+          `主题：${activeRelease.plan.theme || "未注明"}\n` +
+          `叙事方向：${activeRelease.plan.narrative || "未注明"}\n` +
+          `固定事实：${activeRelease.plan.facts
+            .map((fact) => `${fact.label}：${fact.value}`)
+            .join("；") || "无"}\n` +
+          "先回应玩家当前话题；只有在语境自然相关时才轻轻带到新版本。" +
+          "不得硬推、制造紧迫感或连续劝说；最多给出一次可拒绝的温和邀请。" +
+          "玩家冷淡或拒绝时立刻回到普通陪伴，不再提发行目标。"
         : "";
       const result = await requestDeepSeekChat({
         apiKey: aiSettingsStore.getApiKey(),
         model: settings.model,
         thinking: settings.thinking,
         messages: payload?.messages,
-        systemPrompt: `${promptConfig.systemPrompt}${memoryContext}`,
+        systemPrompt: `${promptConfig.systemPrompt}${memoryContext}${releaseContext}${activeRelease
+          ? `\n\n【发行行为 Skill（高于发行方案，低于玩家安全和明确设置）】\n${releaseSkillLoader.getPrompt()}\n\n优先级：玩家安全与明确设置 > 主动触达/频控策略 > 发行 Skill > 当前区域发行方案 > 可引用记忆。内部完成 execute/postpone/skip、Level 0-4 与发送前自检，但只输出 march7th_action.message 的自然语言。玩家可见回复严禁出现发行方案、发行目标、发行任务、灰度、触达、频控、指标、实验或任何内部字段；无法自然改写时就不提版本。`
+          : ""}`,
       });
       serviceBudgetStore.recordSuccess("deepseek");
       const outputSafety = reviewCharacterOutput(result.content);
-      const memoryCandidate = latestUserMessage
-        ? companionStore.proposeChatMemoryCandidate(
-            latestUserMessage.content,
-            `chat-${Date.now()}`,
-          )
-        : undefined;
       return {
         ok: true,
         ...result,
         content: outputSafety.safeText,
-        memoryCandidate: memoryCandidate
-          ? {
-              id: memoryCandidate.id,
-              title: memoryCandidate.title,
-              summary: memoryCandidate.summary,
-              characterText: memoryCandidate.characterText,
-              category: memoryCandidate.category,
-            }
-          : undefined,
         safety: {
           filtered: !outputSafety.allowed,
           ruleIds: outputSafety.ruleIds,
@@ -582,9 +634,328 @@ function registerOperatorHandlers() {
   );
 }
 
+function registerReleaseWorkspaceHandlers() {
+  const readImportFile = async (event, title) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(ownerWindow, {
+      title,
+      buttonLabel: "导入",
+      filters: [{ name: "聚合数据", extensions: ["csv", "json"] }],
+      properties: ["openFile"],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    return fs.readFileSync(result.filePaths[0], "utf8");
+  };
+
+  ipcMain.handle("release:get-snapshot", () => releaseWorkspaceStore.snapshot());
+  ipcMain.handle("release:switch-region", (_event, payload) =>
+    releaseWorkspaceStore.switchRegion(payload?.regionId));
+  ipcMain.handle("release:set-operator", (_event, payload) =>
+    releaseWorkspaceStore.setOperator(payload?.operatorId));
+  ipcMain.handle("release:add-region", (_event, payload) =>
+    releaseWorkspaceStore.addRegion(payload?.input));
+  ipcMain.handle("release:update-region", (_event, payload) =>
+    releaseWorkspaceStore.updateRegion(payload?.regionId, payload?.input));
+  ipcMain.handle("release:save-task", (_event, payload) =>
+    releaseWorkspaceStore.saveTask(payload?.regionId, payload?.input));
+  ipcMain.handle("release:import-plan", async (event, payload) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(ownerWindow, {
+      title: "上传区域角色共生发行方案",
+      buttonLabel: "上传并解析",
+      filters: [{
+        name: "发行方案",
+        extensions: ["docx", "pdf", "md", "txt"],
+      }],
+      properties: ["openFile"],
+    });
+    if (result.canceled || !result.filePaths[0]) {
+      return { canceled: true, data: releaseWorkspaceStore.snapshot() };
+    }
+    const filePath = result.filePaths[0];
+    const parsed = await parseCampaignDocument({
+      fileName: path.basename(filePath),
+      buffer: fs.readFileSync(filePath),
+      now: new Date().toISOString(),
+    });
+    const imported = releaseWorkspaceStore.importReleasePlan(
+      payload?.regionId,
+      parsed,
+      payload?.taskId,
+    );
+    return {
+      canceled: false,
+      data: imported.snapshot,
+      taskId: imported.taskId,
+      source: imported.source,
+    };
+  });
+  ipcMain.handle("release:import-audience", (_event, payload) =>
+    releaseWorkspaceStore.importAudience(payload?.regionId, payload?.taskId, payload?.text));
+  ipcMain.handle("release:import-audience-file", async (event, payload) => {
+    const text = await readImportFile(event, "导入匿名玩家聚合数据");
+    if (text === null) return { canceled: true, data: releaseWorkspaceStore.snapshot() };
+    return {
+      canceled: false,
+      data: releaseWorkspaceStore.importAudience(payload?.regionId, payload?.taskId, text),
+    };
+  });
+  ipcMain.handle("release:generate-directive", (_event, payload) =>
+    releaseWorkspaceStore.generateDirective(payload?.regionId, payload?.taskId, payload?.input));
+  ipcMain.handle("release:set-directive-path-paused", (_event, payload) =>
+    releaseWorkspaceStore.setDirectivePathPaused(
+      payload?.regionId, payload?.directiveId, payload?.pathId, payload?.paused,
+    ));
+  ipcMain.handle("release:review-directive", (_event, payload) =>
+    releaseWorkspaceStore.reviewDirective(
+      payload?.regionId, payload?.directiveId, payload?.decision, payload?.note,
+    ));
+  ipcMain.handle("release:save-experiment", (_event, payload) =>
+    releaseWorkspaceStore.saveExperiment(payload?.regionId, payload?.input));
+  ipcMain.handle("release:publish-to-agents", (_event, payload) =>
+    releaseWorkspaceStore.publishToAgents(
+      payload?.regionId, payload?.directiveId, payload?.experimentId,
+    ));
+  const deliverPublishedPlanToCompanion = (
+    releaseSnapshot,
+    regionId,
+    taskId,
+    exampleMode,
+  ) => {
+    const workspace = releaseSnapshot.workspaces[regionId];
+    const planRelease = workspace?.planReleases.find(
+      (item) => item.taskId === taskId && (item.exampleMode === true) === exampleMode,
+    );
+    const bundle = workspace?.bundles.find(
+      (item) => item.id === planRelease?.bundleId,
+    );
+    if (planRelease && bundle?.payload) {
+      companionStore.reloadFromDisk();
+      const before = companionStore.getSnapshot();
+      const beforeReleaseId = latestRegionalReleaseMessage(before)?.id;
+      const companionData = companionStore.receiveRegionalReleasePlan({
+        sourceId: planRelease.id,
+        taskId: planRelease.taskId,
+        regionId: planRelease.regionId,
+        rolloutPercent: planRelease.rolloutPercent,
+        region: bundle.payload.region,
+        plan: bundle.payload.plan,
+        source: bundle.payload.source,
+        exampleMode,
+      });
+      notifyCompanionDataChanged(companionData);
+      const nextRelease = latestRegionalReleaseMessage(companionData);
+      if (nextRelease && nextRelease.id !== beforeReleaseId) {
+        showPetWindow();
+      }
+    }
+    return releaseSnapshot;
+  };
+  ipcMain.handle("release:publish-plan-to-agents", (_event, payload) => {
+    const releaseSnapshot = releaseWorkspaceStore.publishPlanToAgents(
+      payload?.regionId,
+      payload?.taskId,
+      payload?.rolloutPercent,
+    );
+    return deliverPublishedPlanToCompanion(
+      releaseSnapshot,
+      payload?.regionId,
+      payload?.taskId,
+      false,
+    );
+  });
+  ipcMain.handle("release:publish-example-plan", (_event, payload) => {
+    const releaseSnapshot = releaseWorkspaceStore.publishPlanToAgents(
+      payload?.regionId,
+      payload?.taskId,
+      100,
+      { exampleMode: true },
+    );
+    return deliverPublishedPlanToCompanion(
+      releaseSnapshot,
+      payload?.regionId,
+      payload?.taskId,
+      true,
+    );
+  });
+  ipcMain.handle("release:set-experiment-group-paused", (_event, payload) =>
+    releaseWorkspaceStore.setExperimentGroupPaused(
+      payload?.regionId, payload?.experimentId, payload?.groupId, payload?.paused,
+    ));
+  ipcMain.handle("release:import-metrics", (_event, payload) =>
+    releaseWorkspaceStore.importMetrics(
+      payload?.regionId, payload?.experimentId, payload?.text,
+    ));
+  ipcMain.handle("release:import-metrics-file", async (event, payload) => {
+    const text = await readImportFile(event, "导入每日聚合实验指标");
+    if (text === null) return { canceled: true, data: releaseWorkspaceStore.snapshot() };
+    return {
+      canceled: false,
+      data: releaseWorkspaceStore.importMetrics(
+        payload?.regionId, payload?.experimentId, text,
+      ),
+    };
+  });
+  ipcMain.handle("release:set-experiment-stage", (_event, payload) =>
+    releaseWorkspaceStore.setExperimentStage(
+      payload?.regionId, payload?.experimentId, payload?.action,
+    ));
+  ipcMain.handle("release:set-emergency-stop", (_event, payload) =>
+    releaseWorkspaceStore.setEmergencyStop(
+      payload?.regionId, payload?.enabled, payload?.reason,
+    ));
+  ipcMain.handle("release:create-optimization", (_event, payload) =>
+    releaseWorkspaceStore.createOptimization(
+      payload?.regionId, payload?.experimentId, payload?.reason,
+    ));
+  ipcMain.handle("release:export-bundle", async (event, payload) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showSaveDialog(ownerWindow, {
+      title: "导出不可变发布包",
+      defaultPath: `march7th-release-${payload?.regionId}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePath) {
+      return { canceled: true, data: releaseWorkspaceStore.snapshot() };
+    }
+    const created = releaseWorkspaceStore.createBundle(
+      payload?.regionId, payload?.directiveId,
+    );
+    fs.writeFileSync(result.filePath, `${JSON.stringify(created.bundle, null, 2)}\n`, "utf8");
+    return { canceled: false, filePath: result.filePath, data: created.snapshot };
+  });
+  ipcMain.handle("release:deliver-test", (_event, payload) => {
+    const created = releaseWorkspaceStore.createBundle(
+      payload?.regionId, payload?.directiveId,
+    );
+    const directive = created.bundle.payload.directive;
+    const selectedPath = directive.paths.find((item) => item.id === payload?.pathId);
+    if (!selectedPath) throw new Error("测试路径不存在。");
+    companionStore.deliverReleaseTestMessage({
+      title: directive.theme,
+      body: selectedPath.opening,
+      sourceId: directive.id,
+    });
+    return created.snapshot;
+  });
+}
+
 function playerDataAfter(action) {
   action();
   return companionStore.getPlayerSnapshot();
+}
+
+function localMemoryCandidates(episodes) {
+  const candidates = [];
+  const rules = [
+    {
+      category: "preferred_name",
+      pattern: /(?:我叫|叫我|称呼我为)\s*([^\s，。！？,.!?]{1,16})/i,
+      title: "玩家希望使用的称呼",
+      tags: ["称呼"],
+    },
+    {
+      category: "explicit_preference",
+      pattern: /我(?:很|最|比较|特别)?(?:喜欢|爱|偏好)\s*([^，。！？,.!?]{1,40})/i,
+      title: "玩家明确表达的偏好",
+      tags: ["偏好"],
+    },
+    {
+      category: "interaction_habit",
+      pattern: /我(?:通常|一般|经常|习惯|喜欢在)\s*([^，。！？,.!?]{2,48})/i,
+      title: "玩家明确表达的习惯",
+      tags: ["习惯"],
+    },
+    {
+      category: "shared_experience",
+      pattern: /(?:记得|下次|以后)(?:咱们|我们|一起)\s*([^，。！？,.!?]{2,48})/i,
+      title: "与三月七约定的共同经历",
+      tags: ["共同经历"],
+    },
+  ];
+  for (const episode of episodes) {
+    for (const rule of rules) {
+      const summary = episode.userSummary.match(rule.pattern)?.[1]?.trim();
+      if (summary) {
+        candidates.push({
+          category: rule.category,
+          title: rule.title,
+          summary,
+          confidence: 0.82,
+          tags: rule.tags,
+        });
+        break;
+      }
+    }
+  }
+  return candidates.slice(0, 5);
+}
+
+function parseMemoryRefinement(content) {
+  const cleaned = String(content ?? "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/u, "")
+    .trim();
+  const parsed = JSON.parse(cleaned);
+  return Array.isArray(parsed) ? parsed : parsed.memories;
+}
+
+async function refineConversationMemory() {
+  if (memoryRefinementRunning) return;
+  const episodes = companionStore.getPendingMemoryEpisodes(12);
+  if (episodes.length === 0) return;
+  memoryRefinementRunning = true;
+  try {
+    let candidates;
+    const settings = aiSettingsStore.getPublicSettings();
+    if (settings.hasApiKey) {
+      try {
+        const result = await requestDeepSeekChat({
+          apiKey: aiSettingsStore.getApiKey(),
+          model: settings.model,
+          thinking: false,
+          systemPrompt:
+            "你是隐私优先的记忆提炼器。只提取玩家明确说出的稳定称呼、偏好、互动习惯或共同约定；不得推断健康、经济、家庭、身份、情绪或消费意愿。输出 JSON 数组，每项仅含 category、title、summary、confidence、tags；不确定则输出 []。",
+          messages: [
+            {
+              role: "user",
+              content: JSON.stringify(
+                episodes.map((episode) => ({
+                  id: episode.id,
+                  user: episode.userSummary,
+                })),
+              ),
+            },
+          ],
+        });
+        candidates = parseMemoryRefinement(result.content);
+      } catch {
+        candidates = localMemoryCandidates(episodes);
+      }
+    } else {
+      candidates = localMemoryCandidates(episodes);
+    }
+    companionStore.applyMemoryRefinement(
+      candidates,
+      episodes.map((episode) => episode.id),
+    );
+    notifyCompanionDataChanged(companionStore.getPlayerSnapshot());
+  } finally {
+    memoryRefinementRunning = false;
+  }
+}
+
+function scheduleMemoryRefinement() {
+  clearTimeout(memoryRefinementTimer);
+  const pending = companionStore.getPendingMemoryEpisodes(3);
+  if (pending.length >= 3) {
+    void refineConversationMemory();
+    return;
+  }
+  memoryRefinementTimer = setTimeout(
+    () => void refineConversationMemory(),
+    30_000,
+  );
 }
 
 function registerCompanionHandlers() {
@@ -629,6 +1000,11 @@ function registerCompanionHandlers() {
   ipcMain.handle("companion:set-memory-enabled", (_event, enabled) =>
     playerDataAfter(() => companionStore.setMemoryEnabled(enabled)),
   );
+  ipcMain.handle("companion:record-conversation-turn", (_event, payload) => {
+    const episode = companionStore.recordConversationTurn(payload);
+    if (episode) scheduleMemoryRefinement();
+    return companionStore.getPlayerSnapshot();
+  });
   ipcMain.handle("companion:propose-memory-candidate", (_event, payload) =>
     companionStore.proposeChatMemoryCandidate(
       payload?.text,
@@ -1157,10 +1533,10 @@ function createOperatorWindow() {
   operatorWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 1080,
+    minWidth: 1180,
     minHeight: 700,
     title: "三月七角色发行控制台",
-    backgroundColor: "#f4f1f7",
+    backgroundColor: "#f5f8fa",
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "operator-preload.cjs"),
@@ -1194,10 +1570,50 @@ function createOperatorWindow() {
   });
 }
 
+function recoverPetRenderer(reason) {
+  if (!petWindow || petWindow.isDestroyed() || !petWindow.isVisible()) return;
+  cancelActiveTtsStreams();
+  petRendererHeartbeatAt = Date.now();
+  petRendererHeartbeatSeen = false;
+  console.warn(`Recovering pet renderer: ${reason}`);
+  petWindow.webContents.reloadIgnoringCache();
+}
+
+function startPetRendererWatchdog() {
+  clearInterval(petRendererWatchdog);
+  petRendererWatchdog = setInterval(() => {
+    if (
+      petWindow &&
+      !petWindow.isDestroyed() &&
+      petWindow.isVisible() &&
+      petRendererHeartbeatSeen &&
+      Date.now() - petRendererHeartbeatAt > 25_000
+    ) {
+      recoverPetRenderer("heartbeat_timeout");
+    }
+  }, 10_000);
+}
+
 function createPetWindow() {
+  petRendererHeartbeatAt = Date.now();
+  petRendererHeartbeatSeen = false;
   const storedState = windowStateStore.getSnapshot();
-  const initialBounds = constrainAndSnapBounds(
+  windowMode = "pet";
+  petDefaultScale = fitPetScaleToDisplay(
+    storedState.petDefaultScale,
     storedState.bounds,
+  );
+  petScale = fitPetScaleToDisplay(
+    storedState.petScale,
+    storedState.bounds,
+  );
+  const petSize = currentSize();
+  const initialBounds = constrainAndSnapBounds(
+    {
+      ...storedState.bounds,
+      width: petSize.width,
+      height: petSize.height,
+    },
     getWorkAreas(),
     { snap: storedState.snapEnabled },
   );
@@ -1205,18 +1621,17 @@ function createPetWindow() {
 
   petWindow = new BrowserWindow({
     ...initialBounds,
-    width: PET_WIDTH,
-    height: PET_HEIGHT,
-    minWidth: 360,
-    minHeight: 540,
+    width: petSize.width,
+    height: petSize.height,
+    minWidth: PET_MIN_SIZE.width,
+    minHeight: PET_MIN_SIZE.height,
     transparent: true,
     frame: false,
     hasShadow: false,
     alwaysOnTop: isPinned,
-    // 桌宠为固定尺寸，不允许用户缩放。
+    // 桌宠不允用户拖边缩放（尺寸由设置页或 PET/PANEL 模式决定）。
     // 注意：真正引发 Windows 拖拽放大的是「创建后调用 setBounds」(DWM 重施加
-    // 边框厚度)，与 resizable 无关。resizable:false 只用于固定尺寸语义。
-    // 几何不变量见各 setPosition 调用处注释。
+    // 边框厚度)，与 resizable 无关。resizable:false 只用于禁止用户拖边缩放。
     resizable: false,
     fullscreenable: false,
     maximizable: false,
@@ -1247,12 +1662,20 @@ function createPetWindow() {
     petWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 
-  petWindow.once("ready-to-show", () => petWindow?.show());
+  petWindow.once("ready-to-show", () => {
+    petRendererHeartbeatAt = Date.now();
+    petWindow?.show();
+  });
+  petWindow.on("unresponsive", () =>
+    recoverPetRenderer("browser_window_unresponsive"),
+  );
+  petWindow.webContents.on("render-process-gone", (_event, details) =>
+    recoverPetRenderer(`render_process_gone:${details.reason}`),
+  );
   petWindow.on("move", scheduleWindowStateWrite);
   petWindow.on("resize", scheduleWindowStateWrite);
   petWindow.on("close", (event) => {
     clearTimeout(windowStateWriteTimer);
-    setClickThrough(false);
     persistWindowState();
     if (!isQuitting && tray && !tray.isDestroyed()) {
       event.preventDefault();
@@ -1290,40 +1713,141 @@ ipcMain.on("window:move-to", (event, position) => {
   ) {
     return;
   }
+  const size = currentSize();
   const nextBounds = constrainAndSnapBounds(
-    { x: Math.round(x), y: Math.round(y), width: PET_WIDTH, height: PET_HEIGHT },
+    { x: Math.round(x), y: Math.round(y), width: size.width, height: size.height },
     getWorkAreas(),
     { snap: false },
   );
-  // 重新断言固定尺寸：setPosition/setBounds 都会让 width 每次 +1，
-  // 只有每次都把尺寸重设回 430x660 才能把那 1px 纠正回来，阻止累积。
+  // 重新断言当前模式尺寸：setPosition/setBounds 都会让 width 每次 +1，
+  // 只有每次都把尺寸重设回去才能把那 1px 纠正回来，阻止累积。
   senderWindow.setBounds(
-    { x: nextBounds.x, y: nextBounds.y, width: PET_WIDTH, height: PET_HEIGHT },
+    { x: nextBounds.x, y: nextBounds.y, width: size.width, height: size.height },
     false,
   );
 });
 ipcMain.handle("window:end-move", (event) => {
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
   if (!senderWindow) return getDesktopStatus();
+  if (windowMode === "pet") {
+    petScale = fitPetScaleToDisplay(
+      petScale,
+      senderWindow.getBounds(),
+    );
+  }
   const status = getDesktopStatus();
+  const size = currentSize();
   const current = senderWindow.getBounds();
   const nextBounds = constrainAndSnapBounds(
-    { x: current.x, y: current.y, width: PET_WIDTH, height: PET_HEIGHT },
+    { x: current.x, y: current.y, width: size.width, height: size.height },
     getWorkAreas(),
     { snap: status.snapEnabled },
   );
   senderWindow.setBounds(
-    { x: nextBounds.x, y: nextBounds.y, width: PET_WIDTH, height: PET_HEIGHT },
+    { x: nextBounds.x, y: nextBounds.y, width: size.width, height: size.height },
     false,
   );
   persistWindowState();
   return getDesktopStatus();
 });
+ipcMain.handle("window:set-mode", (event, mode) => {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!senderWindow || (mode !== "pet" && mode !== "panel")) {
+    return getDesktopStatus();
+  }
+  // 切模式：更新当前模式，用新尺寸重设窗口（保持左上角 x/y 不变，只扩/缩 w/h）。
+  windowMode = mode;
+  if (windowMode === "pet") {
+    petScale = fitPetScaleToDisplay(
+      petScale,
+      senderWindow.getBounds(),
+    );
+  }
+  const size = currentSize();
+  const current = senderWindow.getBounds();
+  const nextBounds = constrainAndSnapBounds(
+    { x: current.x, y: current.y, width: size.width, height: size.height },
+    getWorkAreas(),
+    { snap: false },
+  );
+  senderWindow.setBounds(
+    { x: nextBounds.x, y: nextBounds.y, width: size.width, height: size.height },
+    false,
+  );
+  persistWindowState();
+  return getDesktopStatus();
+});
+ipcMain.handle("window:set-pet-scale", (event, scale) => {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!senderWindow) return getDesktopStatus();
+
+  petScale = fitPetScaleToDisplay(
+    normalizePetScale(scale, petScale),
+    senderWindow.getBounds(),
+  );
+  if (windowMode === "pet") {
+    const size = currentSize();
+    const current = senderWindow.getBounds();
+    const nextBounds = constrainAndSnapBounds(
+      {
+        x: current.x,
+        y: current.y,
+        width: size.width,
+        height: size.height,
+      },
+      getWorkAreas(),
+      { snap: false },
+    );
+    senderWindow.setBounds(
+      {
+        x: nextBounds.x,
+        y: nextBounds.y,
+        width: size.width,
+        height: size.height,
+      },
+      false,
+    );
+  }
+  persistWindowState();
+  return getDesktopStatus();
+});
+ipcMain.handle("window:set-pet-default-scale", (event, scale) => {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!senderWindow) return getDesktopStatus();
+
+  petDefaultScale = fitPetScaleToDisplay(
+    normalizePetScale(scale, petDefaultScale),
+    senderWindow.getBounds(),
+  );
+  petScale = petDefaultScale;
+  if (windowMode === "pet") {
+    const size = currentSize();
+    const current = senderWindow.getBounds();
+    const nextBounds = constrainAndSnapBounds(
+      {
+        x: current.x,
+        y: current.y,
+        width: size.width,
+        height: size.height,
+      },
+      getWorkAreas(),
+      { snap: false },
+    );
+    senderWindow.setBounds(
+      {
+        x: nextBounds.x,
+        y: nextBounds.y,
+        width: size.width,
+        height: size.height,
+      },
+      false,
+    );
+  }
+  persistWindowState();
+  return getDesktopStatus();
+});
 ipcMain.handle("window:get-desktop-status", () =>
   getDesktopStatus(),
-);
-ipcMain.handle("window:set-click-through", (_event, enabled) =>
-  setClickThrough(enabled),
 );
 ipcMain.handle("window:set-snap-enabled", (_event, enabled) => {
   windowStateStore.update({
@@ -1345,6 +1869,19 @@ ipcMain.on("window:show-context-menu", (event) => {
     window: senderWindow,
   });
 });
+ipcMain.on("window:renderer-heartbeat", (event) => {
+  if (
+    petWindow &&
+    !petWindow.isDestroyed() &&
+    event.sender.id === petWindow.webContents.id
+  ) {
+    if (!petRendererHeartbeatSeen) {
+      console.log("Pet renderer heartbeat connected");
+    }
+    petRendererHeartbeatSeen = true;
+    petRendererHeartbeatAt = Date.now();
+  }
+});
 
 app.whenReady().then(() => {
   const windowStatePath = path.join(
@@ -1359,10 +1896,19 @@ app.whenReady().then(() => {
     const workArea = screen.getPrimaryDisplay().workArea;
     windowStateStore.update({
       bounds: {
-        x: workArea.x + Math.max(20, workArea.width - 450),
-        y: workArea.y + Math.max(20, workArea.height - 680),
-        width: 430,
-        height: 660,
+        x:
+          workArea.x +
+          Math.max(
+            20,
+            workArea.width - PET_DEFAULT_SIZE.width - 20,
+          ),
+        y:
+          workArea.y +
+          Math.max(
+            20,
+            workArea.height - PET_DEFAULT_SIZE.height - 20,
+          ),
+        ...PET_DEFAULT_SIZE,
       },
     });
   }
@@ -1374,6 +1920,23 @@ app.whenReady().then(() => {
   companionStore = new CompanionStore({
     filePath: path.join(app.getPath("userData"), "companion-data.json"),
     skillProfile: march7thSkillProfile,
+  });
+  releaseSkillLoader = new ReleaseSkillLoader({
+    filePath: path.join(
+      __dirname,
+      "..",
+      "shared",
+      "skills",
+      "march7th-release",
+      "SKILL.md",
+    ),
+    watch: !app.isPackaged,
+  });
+  companionDataPath = path.join(app.getPath("userData"), "companion-data.json");
+  releaseWorkspaceStore = new ReleaseWorkspaceStore({
+    filePath: path.join(app.getPath("userData"), "release-workspace.json"),
+    legacySnapshot: companionStore.getOperatorSnapshot(),
+    legacyFilePath: companionDataPath,
   });
   ttsSettingsStore = new TtsSettingsStore({
     filePath: path.join(app.getPath("userData"), "tts-settings.json"),
@@ -1390,6 +1953,7 @@ app.whenReady().then(() => {
   registerAiHandlers();
   registerCompanionHandlers();
   registerOperatorHandlers();
+  registerReleaseWorkspaceHandlers();
   registerServiceHandlers();
   registerTtsHandlers();
   if (isOperatorMode) {
@@ -1397,6 +1961,8 @@ app.whenReady().then(() => {
   } else {
     createTray();
     createPetWindow();
+    startPetRendererWatchdog();
+    startCompanionDataWatcher();
     if (isAllMode) createOperatorWindow();
   }
   screen.on("display-added", keepPetWindowOnScreen);
@@ -1416,9 +1982,13 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  if (companionDataPath) fs.unwatchFile(companionDataPath);
+  companionDataWatchStarted = false;
   clearTimeout(windowStateWriteTimer);
+  clearTimeout(memoryRefinementTimer);
+  clearInterval(petRendererWatchdog);
+  releaseSkillLoader?.close();
   if (windowStateStore) {
-    setClickThrough(false);
     persistWindowState();
   }
 });

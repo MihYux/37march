@@ -1,11 +1,11 @@
-From 676fde27fb72eb33ac45427aa35de7c3318d8e52 Mon Sep 17 00:00:00 2001
+From 7e69fbc3b06da4f70844e6cdeb203d0a4a8ab838 Mon Sep 17 00:00:00 2001
 From: maybebebee <46649107@qq.com>
 Date: Fri, 24 Jul 2026 23:34:33 +0800
-Subject: [PATCH] Add controlled character release system
+Subject: [PATCH 1/2] Add controlled character release system
 
 ---
  CHANGELOG.md                                  |   5 +
- README.md                                     |  18 +-
+ README.md                                     |  17 +
  docs/PRIVACY.md                               |   6 +-
  electron/campaign-generator.cjs               | 139 ++++
  electron/campaign-review.cjs                  | 112 ++-
@@ -23,7 +23,7 @@ Subject: [PATCH] Add controlled character release system
  electron/release-system.test.cjs              | 219 +++++
  package-lock.json                             | 173 +++-
  package.json                                  |   6 +-
- src/App.tsx                                   |  76 +-
+ src/App.tsx                                   |  89 +-
  src/ai/types.ts                               |   9 +
  src/components/AlbumPanel.tsx                 |  47 +-
  src/components/CampaignStudioPanel.tsx        | 247 +++++-
@@ -31,11 +31,11 @@ Subject: [PATCH] Add controlled character release system
  src/main.tsx                                  |   6 +-
  src/operator/OperatorApp.tsx                  |  54 ++
  src/operator/api.ts                           |  61 ++
- src/styles.css                                | 759 +++++++++++++++++-
+ src/styles.css                                | 757 +++++++++++++++++-
  src/vite-env.d.ts                             |  52 +-
  ...10\345\271\266\346\214\207\345\215\227.md" | 120 +++
  ...64\346\226\260\346\226\207\346\241\243.md" | 445 ++++++++++
- 31 files changed, 4188 insertions(+), 158 deletions(-)
+ 31 files changed, 4200 insertions(+), 156 deletions(-)
  create mode 100644 electron/campaign-generator.cjs
  create mode 100644 electron/memory-candidates.cjs
  create mode 100644 electron/operator-preload.cjs
@@ -64,10 +64,10 @@ index ec10d97..978e2d3 100644
  
  - 当前角色 PNG 的正式公开或商业再分发证据尚未归档；
 diff --git a/README.md b/README.md
-index 32197d6..c60065a 100644
+index 7df3650..f156e2a 100644
 --- a/README.md
 +++ b/README.md
-@@ -1020,12 +1020,28 @@ public/assets/march7th-pet.png
+@@ -1033,11 +1033,28 @@ public/assets/march7th-pet.png
  
  当前项目没有配置 Apple Developer ID。源码开发不受影响，但正式分发前需要完成签名与公证。
  
@@ -92,7 +92,6 @@ index 32197d6..c60065a 100644
  - 当前视觉是单张概念图，不是 Live2D、Spine 或分层骨骼动画；
  - 当前自由聊天仍只保留在内存，不会自动写入共同记忆；
  - 没有开机启动、自动更新和崩溃上报；
--- 发行沙盒当前使用受控本地渲染器，不使用在线模型生成发行内容；
 +- 发行控制台的有限生成模式可调用已配置的 DeepSeek；模型只生成候选内容，不能跳过确定性检查、人工审批与内容包发布；
  - 对话 Provider 当前固定为 DeepSeek；
  - 语音 Provider 当前固定为 DashScope CosyVoice；
@@ -1349,7 +1348,7 @@ index a847da1..3df1038 100644
      const reducedThreshold = Date.parse(evaluatedAt) - 14 * 24 * 60 * 60 * 1_000;
      const recentlySentSameType = data.messages.some(
 diff --git a/electron/main.cjs b/electron/main.cjs
-index 48d5381..791bd10 100644
+index 7ce6e27..0b4ea4a 100644
 --- a/electron/main.cjs
 +++ b/electron/main.cjs
 @@ -18,6 +18,11 @@ const march7thSkillProfile = require("../shared/march7th-skill-profile.json");
@@ -1364,7 +1363,7 @@ index 48d5381..791bd10 100644
  const {
    evaluateChatInput,
    reviewCharacterOutput,
-@@ -37,7 +42,13 @@ const {
+@@ -43,7 +48,13 @@ const {
  } = require("./window-state.cjs");
  
  let petWindow;
@@ -1378,7 +1377,7 @@ index 48d5381..791bd10 100644
  let isPinned = true;
  let isQuitting = false;
  let windowStateStore;
-@@ -55,6 +66,13 @@ let serviceBudgetStore;
+@@ -67,6 +78,13 @@ let serviceBudgetStore;
  let ttsSettingsStore;
  const activeTtsStreams = new Map();
  
@@ -1392,7 +1391,7 @@ index 48d5381..791bd10 100644
  const TTS_INSTRUCTIONS = Object.freeze({
    soft: "请用温柔、真诚、坚定的语气表达，语速稍慢。",
    proud: "请用轻快、带一点小得意的语气表达。",
-@@ -192,10 +210,10 @@ function setPinned(nextPinned) {
+@@ -197,10 +215,10 @@ function setPinned(nextPinned) {
  function toggleCompanionPauseFromMenu() {
    if (!companionStore) return;
    const snapshot = companionStore.getSnapshot();
@@ -1812,8 +1811,8 @@ index 48d5381..791bd10 100644
 +
  function createPetWindow() {
    const storedState = windowStateStore.getSnapshot();
-   const initialBounds = constrainAndSnapBounds(
-@@ -1026,7 +1267,9 @@ function createPetWindow() {
+   windowMode = "pet";
+@@ -1038,7 +1279,9 @@ function createPetWindow() {
  }
  
  ipcMain.on("window:minimize", () => petWindow?.minimize());
@@ -1824,7 +1823,7 @@ index 48d5381..791bd10 100644
  ipcMain.handle("window:toggle-pin", () => {
    return setPinned(!isPinned);
  });
-@@ -1146,16 +1389,27 @@ app.whenReady().then(() => {
+@@ -1268,16 +1511,27 @@ app.whenReady().then(() => {
    });
    registerAiHandlers();
    registerCompanionHandlers();
@@ -2039,10 +2038,10 @@ index f6af1d4..b906940 100644
    const delivered = data.messages.find((item) => item.id === message.id);
    assert.equal(delivered.sentAt, data.demoNow);
 diff --git a/electron/preload.cjs b/electron/preload.cjs
-index fba477d..ff9038e 100644
+index 28afdaa..54b2069 100644
 --- a/electron/preload.cjs
 +++ b/electron/preload.cjs
-@@ -82,6 +82,21 @@ contextBridge.exposeInMainWorld("marchDesktop", {
+@@ -85,6 +85,21 @@ contextBridge.exposeInMainWorld("marchDesktop", {
        }),
      setMemoryEnabled: (enabled) =>
        ipcRenderer.invoke("companion:set-memory-enabled", enabled),
@@ -2064,7 +2063,7 @@ index fba477d..ff9038e 100644
      deleteMemory: (memoryId) =>
        ipcRenderer.invoke("companion:delete-memory", memoryId),
      clearMemories: () =>
-@@ -124,48 +139,6 @@ contextBridge.exposeInMainWorld("marchDesktop", {
+@@ -127,48 +142,6 @@ contextBridge.exposeInMainWorld("marchDesktop", {
        ipcRenderer.invoke("companion:register-ignored-contact"),
      registerPlayerInteraction: () =>
        ipcRenderer.invoke("companion:register-player-interaction"),
@@ -3193,7 +3192,7 @@ index 6c460ae..ef3948c 100644
      "react-dom": "^19.2.8"
    },
 diff --git a/src/App.tsx b/src/App.tsx
-index e814d11..473a88c 100644
+index 4dbfe71..86b5112 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
 @@ -29,6 +29,7 @@ import {
@@ -3204,7 +3203,7 @@ index e814d11..473a88c 100644
    TtsPublicSettings,
    TtsStreamEvent,
  } from "./ai/types";
-@@ -197,6 +198,9 @@ function App() {
+@@ -214,6 +215,9 @@ function App() {
    const [input, setInput] = useState("");
    const [pinned, setPinned] = useState(true);
    const [modelReady, setModelReady] = useState(false);
@@ -3214,7 +3213,7 @@ index e814d11..473a88c 100644
    const [ttsSettings, setTtsSettings] =
      useState<TtsPublicSettings | null>(null);
    const [voiceState, setVoiceState] = useState<VoiceState>("idle");
-@@ -865,6 +869,7 @@ function App() {
+@@ -882,6 +886,7 @@ function App() {
      let replyText = "";
      let replyMood: MarchMood = "bright";
      let source: ReplySource = "local";
@@ -3222,7 +3221,7 @@ index e814d11..473a88c 100644
  
      if (window.marchDesktop?.ai && modelReady) {
        try {
-@@ -878,6 +883,7 @@ function App() {
+@@ -895,6 +900,7 @@ function App() {
              result.model === "local-safety-guard"
                ? "local"
                : "model";
@@ -3230,7 +3229,7 @@ index e814d11..473a88c 100644
          } else {
            const fallback = getMarchReply(cleanInput);
            replyText = fallback.text;
-@@ -896,6 +902,26 @@ function App() {
+@@ -913,6 +919,26 @@ function App() {
        replyMood = fallback.mood;
      }
  
@@ -3257,7 +3256,7 @@ index e814d11..473a88c 100644
      const marchMessage: Message = {
        id: nextMessageId.current++,
        role: "march",
-@@ -910,6 +936,25 @@ function App() {
+@@ -927,6 +953,25 @@ function App() {
      setSending(false);
    };
  
@@ -3283,51 +3282,64 @@ index e814d11..473a88c 100644
    const togglePin = async () => {
      const nextPinned = window.marchDesktop
        ? await window.marchDesktop.togglePin()
-@@ -1272,9 +1317,8 @@ function App() {
-           aria-label="和三月七打招呼"
-           title="单击互动，也可以拖动窗口"
-           onClick={surpriseMe}
--          animate={{ y: [0, -7, 0], rotate: [0, 0.35, 0] }}
--          transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
--          whileHover={{ scale: 1.025 }}
-+          whileHover={{ y: -2, scale: 1.025 }}
-+          transition={{ duration: 0.18 }}
-           whileTap={{ scale: 0.985 }}
-         >
-           <img
-@@ -1426,6 +1470,32 @@ function App() {
-                 ),
-               )}
-             </div>
-+            {memoryCandidate && (
-+              <aside className="memory-candidate-card" aria-live="polite">
+@@ -1261,7 +1306,22 @@ function App() {
+                 </button>
+               </form>
+             )}
+-          </motion.div>
++            {bubbleChatOpen && memoryCandidate && (
++              <aside className="memory-candidate-card compact" aria-live="polite">
 +                <div>
 +                  <strong>{memoryCandidate.title}</strong>
 +                  <p>{memoryCandidate.summary}</p>
-+                  <small>确认前不会进入长期记忆，也不会用于发行内容。</small>
 +                </div>
 +                <div>
-+                  <button
-+                    type="button"
-+                    disabled={memoryDecisionBusy}
-+                    onClick={() => void resolveMemoryCandidate(false)}
-+                  >
++                  <button type="button" disabled={memoryDecisionBusy} onClick={() => void resolveMemoryCandidate(false)}>
 +                    不保存
 +                  </button>
-+                  <button
-+                    type="button"
-+                    className="confirm"
-+                    disabled={memoryDecisionBusy}
-+                    onClick={() => void resolveMemoryCandidate(true)}
-+                  >
++                  <button type="button" className="confirm" disabled={memoryDecisionBusy} onClick={() => void resolveMemoryCandidate(true)}>
 +                    让咱记住
 +                  </button>
 +                </div>
 +              </aside>
-+            )}
-             <form className="chat-form" onSubmit={submitMessage}>
-               <input
-                 ref={inputRef}
++            )}          </motion.div>
+         </section>
+       )}
+ 
+@@ -1342,7 +1402,32 @@ function App() {
+                   ),
+                 )}
+               </div>
+-              <form className="chat-form" onSubmit={submitMessage}>
++              {memoryCandidate && (
++                <aside className="memory-candidate-card" aria-live="polite">
++                  <div>
++                    <strong>{memoryCandidate.title}</strong>
++                    <p>{memoryCandidate.summary}</p>
++                    <small>确认前不会进入长期记忆，也不会用于发行内容。</small>
++                  </div>
++                  <div>
++                    <button
++                      type="button"
++                      disabled={memoryDecisionBusy}
++                      onClick={() => void resolveMemoryCandidate(false)}
++                    >
++                      不保存
++                    </button>
++                    <button
++                      type="button"
++                      className="confirm"
++                      disabled={memoryDecisionBusy}
++                      onClick={() => void resolveMemoryCandidate(true)}
++                    >
++                      让咱记住
++                    </button>
++                  </div>
++                </aside>
++              )}              <form className="chat-form" onSubmit={submitMessage}>
+                 <input
+                   ref={inputRef}
+                   value={input}
 diff --git a/src/ai/types.ts b/src/ai/types.ts
 index f14c070..8a2276c 100644
 --- a/src/ai/types.ts
@@ -3356,10 +3368,10 @@ index f14c070..8a2276c 100644
    | {
        ok: false;
 diff --git a/src/components/AlbumPanel.tsx b/src/components/AlbumPanel.tsx
-index 29c7600..72c60c8 100644
+index be11044..f71e459 100644
 --- a/src/components/AlbumPanel.tsx
 +++ b/src/components/AlbumPanel.tsx
-@@ -60,12 +60,14 @@ function MemoryCard({
+@@ -62,12 +62,14 @@ function MemoryCard({
    memoryEnabled,
    busy,
    onToggleReusable,
@@ -3374,7 +3386,7 @@ index 29c7600..72c60c8 100644
    onDelete: (memory: MemoryRecord) => void;
  }) {
    return (
-@@ -129,6 +131,28 @@ function MemoryCard({
+@@ -131,6 +133,28 @@ function MemoryCard({
                ? "可在未来引用"
                : "不会用于未来对话"}
            </button>
@@ -3403,7 +3415,7 @@ index 29c7600..72c60c8 100644
            <button
              type="button"
              className="memory-delete-button"
-@@ -158,10 +182,15 @@ export function AlbumPanel({
+@@ -160,10 +184,15 @@ export function AlbumPanel({
    } | null>(null);
  
    const memories = useMemo(() => {
@@ -3421,7 +3433,7 @@ index 29c7600..72c60c8 100644
      return [...filtered].sort(
        (left, right) =>
          Date.parse(right.createdAt) - Date.parse(left.createdAt),
-@@ -221,6 +250,19 @@ export function AlbumPanel({
+@@ -223,6 +252,19 @@ export function AlbumPanel({
      );
    };
  
@@ -3441,7 +3453,7 @@ index 29c7600..72c60c8 100644
    const deleteMemory = (memory: MemoryRecord) => {
      const api = window.marchDesktop?.companion;
      if (!api) return;
-@@ -368,6 +410,7 @@ export function AlbumPanel({
+@@ -370,6 +412,7 @@ export function AlbumPanel({
                memoryEnabled={data.profile.memoryEnabled}
                busy={Boolean(busyAction)}
                onToggleReusable={toggleReusable}
@@ -3767,7 +3779,7 @@ index b11d078..efcb540 100644
                  title="任务自动检查"
                  review={selectedCampaign.automaticReview}
 diff --git a/src/domain/types.ts b/src/domain/types.ts
-index 4652c57..523fca6 100644
+index 1070a29..bde6b18 100644
 --- a/src/domain/types.ts
 +++ b/src/domain/types.ts
 @@ -197,6 +197,20 @@ export interface MemoryRecord {
@@ -4045,10 +4057,10 @@ index 0000000..355155c
 +  close: () => void;
 +}
 diff --git a/src/styles.css b/src/styles.css
-index 91fb972..0a6215c 100644
+index 1864c63..2fe6835 100644
 --- a/src/styles.css
 +++ b/src/styles.css
-@@ -336,12 +336,12 @@ a:focus-visible {
+@@ -428,12 +428,12 @@ a:focus-visible {
  }
  
  .pet-state-looking .character-button img {
@@ -4063,11 +4075,10 @@ index 91fb972..0a6215c 100644
  }
  
  .pet-state-new-message .character-button {
-@@ -4178,3 +4178,758 @@ a:focus-visible {
-     animation-iteration-count: 1 !important;
-   }
- }
-+
+@@ -4897,4 +4897,757 @@ a:focus-visible {
+   background: #d85c7c;
+   background-image: none;
+   box-shadow: none;
 +
 +/* Independent internal release operator surface */
 +.operator-shell,
@@ -4821,9 +4832,9 @@ index 91fb972..0a6215c 100644
 +  .operator-shell .campaign-notice {
 +    left: 30px;
 +  }
-+}
+ }
 diff --git a/src/vite-env.d.ts b/src/vite-env.d.ts
-index a9ef7f6..3efc64a 100644
+index 9ada321..056a1f5 100644
 --- a/src/vite-env.d.ts
 +++ b/src/vite-env.d.ts
 @@ -13,6 +13,7 @@ import type {
@@ -4850,7 +4861,7 @@ index a9ef7f6..3efc64a 100644
      marchDesktop?: {
        minimize: () => void;
        close: () => void;
-@@ -78,6 +81,18 @@ declare global {
+@@ -80,6 +83,18 @@ declare global {
            reusable: boolean,
          ) => Promise<CompanionData>;
          setMemoryEnabled: (enabled: boolean) => Promise<CompanionData>;
@@ -4869,7 +4880,7 @@ index a9ef7f6..3efc64a 100644
          deleteMemory: (memoryId: string) => Promise<CompanionData>;
          clearMemories: () => Promise<CompanionData>;
          createPhotoMemory: () => Promise<CompanionData>;
-@@ -132,43 +147,6 @@ declare global {
+@@ -134,43 +149,6 @@ declare global {
          evaluateEvent: (eventId: string) => Promise<CompanionData>;
          registerIgnoredContact: () => Promise<CompanionData>;
          registerPlayerInteraction: () => Promise<CompanionData>;

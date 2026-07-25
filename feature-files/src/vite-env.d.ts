@@ -44,16 +44,19 @@ declare global {
       moveWindowTo: (position: { x: number; y: number }) => void;
       endWindowMove: () => Promise<DesktopWindowStatus>;
       getDesktopStatus: () => Promise<DesktopWindowStatus>;
-      setClickThrough: (
-        enabled: boolean,
-      ) => Promise<DesktopWindowStatus>;
       setSnapEnabled: (
         enabled: boolean,
+      ) => Promise<DesktopWindowStatus>;
+      setMode: (mode: "pet" | "panel") => Promise<DesktopWindowStatus>;
+      setPetScale: (scale: number) => Promise<DesktopWindowStatus>;
+      setPetDefaultScale: (
+        scale: number,
       ) => Promise<DesktopWindowStatus>;
       show: (
         route?: DesktopRoute,
       ) => Promise<DesktopWindowStatus>;
       showContextMenu: () => void;
+      reportRendererHeartbeat: () => void;
       onNavigate: (callback: (route: DesktopRoute) => void) => void;
       clearNavigateListener: () => void;
       onCompanionDataChange: (
@@ -81,6 +84,14 @@ declare global {
           reusable: boolean,
         ) => Promise<CompanionData>;
         setMemoryEnabled: (enabled: boolean) => Promise<CompanionData>;
+        recordConversationTurn: (input: {
+          conversationId: string;
+          turnId: string;
+          userText: string;
+          assistantText: string;
+          replySource: "model" | "local" | "error";
+          topics?: string[];
+        }) => Promise<CompanionData>;
         proposeMemoryCandidate: (
           text: string,
           sourceId: string,

@@ -52,6 +52,8 @@ function formatMemoryDate(value: string) {
     year: "numeric",
     month: "short",
     day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   }).format(new Date(value));
 }
 
@@ -184,8 +186,9 @@ export function AlbumPanel({
   const memories = useMemo(() => {
     const confirmedMemories = data.memories.filter(
       (memory) =>
-        memory.status === "confirmed" ||
-        (memory.status === undefined && memory.userConfirmed),
+        (memory.sourceType === "photo" || memory.type === "photo") &&
+        (memory.status === "confirmed" ||
+          (memory.status === undefined && memory.userConfirmed)),
     );
     const filtered =
       filter === "all"
@@ -278,21 +281,6 @@ export function AlbumPanel({
     );
   };
 
-  const clearMemories = () => {
-    const api = window.marchDesktop?.companion;
-    if (!api || data.memories.length === 0) return;
-    const confirmed = window.confirm(
-      `确定清空全部 ${data.memories.length} 条共同记忆吗？\n\n通信记录中的可识别记忆引用也会被移除。此操作无法撤销。`,
-    );
-    if (!confirmed) return;
-
-    void runMutation(
-      "clear-all",
-      () => api.clearMemories(),
-      "全部共同记忆已经清空。",
-    );
-  };
-
   const exportMemories = async () => {
     const api = window.marchDesktop?.companion;
     if (!api) return;
@@ -335,8 +323,8 @@ export function AlbumPanel({
           <span className="eyebrow">OUR JOURNEY · 模拟数据</span>
           <h2>共同旅行相册</h2>
           <p>
-            {data.memories.length} 段共同记忆 ·
-            只有你允许的内容才会在未来被引用
+            {data.memories.filter((memory) => memory.sourceType === "photo" || memory.type === "photo").length} 段共同记忆 ·
+            这里只展示你主动拍下并保存的照片记忆
           </p>
         </div>
         <button
@@ -418,7 +406,7 @@ export function AlbumPanel({
           <div className="album-empty">
             <ImagesSquare weight="duotone" />
             <strong>
-              {data.memories.length
+              {data.memories.filter((memory) => memory.sourceType === "photo" || memory.type === "photo").length
                 ? "这个分类还没有共同记忆"
                 : "相册还是空的"}
             </strong>
@@ -449,15 +437,6 @@ export function AlbumPanel({
             <DownloadSimple />
           )}
           导出记忆 JSON
-        </button>
-        <button
-          type="button"
-          className="album-clear-button"
-          disabled={Boolean(busyAction) || data.memories.length === 0}
-          onClick={clearMemories}
-        >
-          <Trash />
-          清空全部
         </button>
       </footer>
     </motion.section>
